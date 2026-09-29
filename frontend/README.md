@@ -1,32 +1,29 @@
-# React + TypeScript + Vite
+# Frontend - Product Video Discovery Dashboard
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+This directory contains the React + Vite frontend for the Product Video Discovery Dashboard. It provides a clean, responsive, and dynamic user interface to search for and review curated product videos.
 
-Currently, two official plugins are available:
+## Tech Stack
+- **Framework:** React 18
+- **Build Tool:** Vite
+- **Styling:** TailwindCSS
+- **State Management:** React hooks + internal Context (where applicable)
+- **Deployment Ready:** Configured for seamless deployment on Vercel (`vercel.json` included for API proxying).
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Project Structure
+- `src/` - Contains all React components, hooks, and API integrations.
+- `public/` - Static assets like the favicon and SVGs.
+- `vercel.json` - Vercel edge configuration to proxy `/api` calls directly to the Render backend, bypassing CORS issues.
 
-## React Compiler
+## Local Development
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
-```
-
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+1. Ensure the backend is running locally on port `3001`.
+2. Install dependencies:
+   ```bash
+   npm install
+   ```
+3. Start the development server:
+   ```bash
+   npm run dev
+   ```
+4. The dashboard will be available at `http://localhost:5173`. 
+*(Note: Vite automatically proxies `/api` calls to `http://localhost:3001` during local development via `vite.config.ts`).*
