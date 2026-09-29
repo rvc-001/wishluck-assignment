@@ -1,0 +1,52 @@
+[
+  {
+    "url": "https://www.instagram.com/reel/example1/",
+    "platformId": "example1",
+    "thumbnail": "https://picsum.photos/seed/reel1/400/700",
+    "caption": "#dress #fashion #ootd floral midi dress summer vibes 🌸",
+    "platform": "instagram",
+    "likes": 1243,
+    "views": 45000,
+    "author": "@fashionista.daily"
+  },
+  {
+    "url": "https://www.instagram.com/reel/example2/",
+    "platformId": "example2",
+    "thumbnail": "https://picsum.photos/seed/reel2/400/700",
+    "caption": "New summer collection drop! #floral #dress #summer",
+    "platform": "instagram",
+    "likes": 890,
+    "views": 32000,
+    "author": "@boutique.style"
+  },
+  {
+    "url": "https://www.instagram.com/reel/example3/",
+    "platformId": "example3",
+    "thumbnail": "https://picsum.photos/seed/reel3/400/700",
+    "caption": "Floral print midi dress — link in bio! #fashion #ootd #mididress",
+    "platform": "instagram",
+    "likes": 2100,
+    "views": 78000,
+    "author": "@style.central"
+  },
+  {
+    "url": "https://www.instagram.com/reel/example4/",
+    "platformId": "example4",
+    "thumbnail": "https://picsum.photos/seed/reel4/400/700",
+    "caption": "GRWM florals 🌺 #gettingreadywithme #floralprint",
+    "platform": "instagram",
+    "likes": 560,
+    "views": 18000,
+    "author": "@daily.looks"
+  },
+  {
+    "url": "https://www.instagram.com/reel/example5/",
+    "platformId": "example5",
+    "thumbnail": "https://picsum.photos/seed/reel5/400/700",
+    "caption": "Spring florals are here 🌷 this midi dress is everything",
+    "platform": "instagram",
+    "likes": 3400,
+    "views": 120000,
+    "author": "@fashionwithher"
+  }
+]

@@ -1,0 +1,35 @@
+[
+  {
+    "adId": "meta_ad_001",
+    "advertiserName": "Fashion Brand A",
+    "adText": "Shop our new floral midi dress — perfect for summer! Limited stock.",
+    "videoUrl": "https://example.com/ad-video-001.mp4",
+    "thumbnail": "https://picsum.photos/seed/metaad1/400/400",
+    "impressions": "50K-100K",
+    "platform": "meta",
+    "metaPath": "fallback",
+    "startDate": "2026-09-01"
+  },
+  {
+    "adId": "meta_ad_002",
+    "advertiserName": "Style House",
+    "adText": "Floral print dress — as seen on Instagram. Free shipping on orders $50+",
+    "videoUrl": "https://example.com/ad-video-002.mp4",
+    "thumbnail": "https://picsum.photos/seed/metaad2/400/400",
+    "impressions": "10K-50K",
+    "platform": "meta",
+    "metaPath": "fallback",
+    "startDate": "2026-09-10"
+  },
+  {
+    "adId": "meta_ad_003",
+    "advertiserName": "Boutique Online",
+    "adText": "Summer floral dress sale — 30% off this weekend only!",
+    "videoUrl": "https://example.com/ad-video-003.mp4",
+    "thumbnail": "https://picsum.photos/seed/metaad3/400/400",
+    "impressions": "100K+",
+    "platform": "meta",
+    "metaPath": "official",
+    "startDate": "2026-09-15"
+  }
+]

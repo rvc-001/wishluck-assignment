@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build outputs
+dist/
+build/
+
+# Environment files — NEVER commit these
+.env
+.env.local
+.env.production
+
+# Database files
+*.db
+*.db-journal
+prisma/*.db
+
+# Prisma generated client (regenerate with: npx prisma generate)
+node_modules/.prisma/
+
+# Logs
+*.log
+npm-debug.log*
+pino-*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Playwright browsers (large, re-downloadable)
+playwright-browsers/
+
+# Redis dump
+dump.rdb
+
+# Videos
+*.mp4

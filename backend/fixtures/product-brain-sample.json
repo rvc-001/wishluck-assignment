@@ -1,0 +1,16 @@
+{
+  "productTitle": "Floral Print Midi Dress",
+  "productImageUrl": "https://picsum.photos/seed/product1/600/800",
+  "attributes": {
+    "productType": "floral print midi dress",
+    "colors": ["coral", "white", "sage green"],
+    "patterns": ["floral", "ditsy print"],
+    "logoOrText": "none",
+    "material": "cotton blend",
+    "shape": "A-line midi",
+    "searchQueries": ["#floralMidiDress", "#summerDress", "#floralFashion", "#ootd"],
+    "adKeywords": ["floral midi dress", "summer floral dress", "women's floral dress"],
+    "matchCriteria": "A-line midi dress with coral and white floral ditsy print pattern, no visible logo or text"
+  },
+  "embedding": null
+}

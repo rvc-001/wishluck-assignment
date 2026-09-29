@@ -1,0 +1,53 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Search {
+  id           String         @id @default(cuid())
+  query        String
+  queryType    String         // "keyword" | "url" | "image"
+  productTitle String
+  imageUrl     String
+  attributesJson String       @default("{}")
+  status       String         // "pending" | "running" | "done" | "failed"
+  createdAt    DateTime       @default(now())
+  results      SearchResult[]
+}
+
+model Video {
+  id             String         @id @default(cuid())
+  platform       String         // "instagram" | "meta" | "tiktok"
+  platformId     String
+  url            String         @default("")
+  thumbnailUrl   String         @default("")
+  caption        String         @default("")
+  urlHash        String         @unique
+  thumbPHash     String         @default("")
+  captionSimhash String         @default("")
+  embedding      Bytes          // bytea in PostgreSQL
+  metaPath       String?        // "official" | "fallback"
+  createdAt      DateTime       @default(now())
+  results        SearchResult[]
+
+  @@unique([platform, platformId])
+}
+
+model SearchResult {
+  searchId  String
+  videoId   String
+  score     Float
+  label     String   // "match" | "possible" | "discard"
+  reason    String
+  shortlisted Boolean @default(false)
+  createdAt DateTime @default(now())
+
+  search Search @relation(fields: [searchId], references: [id])
+  video  Video  @relation(fields: [videoId], references: [id])
+
+  @@id([searchId, videoId])
+}

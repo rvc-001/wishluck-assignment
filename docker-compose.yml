@@ -1,0 +1,69 @@
+version: "3.9"
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: wishluck-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: wishluck-backend
+    ports:
+      - "3001:3001"
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - REDIS_URL=redis://redis:6379
+      - QUEUE_MODE=bullmq
+      - DATABASE_URL=${DATABASE_URL:-file:/app/data/dev.db}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - VISION_MODEL=${VISION_MODEL:-gemini-3.5-flash-lite}
+      - VISION_MODEL_FALLBACKS=${VISION_MODEL_FALLBACKS:-gemini-3.5-flash,gemini-2.5-flash,gemma-4-26b-a4b-it}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-gemini-embedding-2}
+      - VLM_TOP_N=${VLM_TOP_N:-15}
+      - APIFY_API_TOKEN=${APIFY_API_TOKEN}
+      - META_AD_LIBRARY_ACCESS_TOKEN=${META_AD_LIBRARY_ACCESS_TOKEN}
+      - META_ENABLE_OFFICIAL=${META_ENABLE_OFFICIAL:-false}
+      - META_FALLBACK_COUNTRY=${META_FALLBACK_COUNTRY:-US}
+      - META_FALLBACK_MAX_POLLS=${META_FALLBACK_MAX_POLLS:-6}
+      - USE_FIXTURES=${USE_FIXTURES:-false}
+      - ENABLE_TIKTOK=${ENABLE_TIKTOK:-false}
+      - CORS_ORIGIN=http://localhost:5173
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - backend_data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3001/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: wishluck-frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  backend_data:
