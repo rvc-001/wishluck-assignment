@@ -16,6 +16,7 @@ import { startSearchWorker } from "./jobs/searchQueue";
 import searchRoutes from "./routes/search";
 
 const app = express();
+app.set("trust proxy", 1);
 
 // ─── Security middleware ──────────────────────────────────────────────────────
 app.use(helmet());

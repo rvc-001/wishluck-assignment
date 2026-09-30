@@ -652,34 +652,54 @@ export async function bulkScoreVideos(
   // VLM verify top-N
   const vlmResults = await Promise.all(
     topCandidates.map(async (c) => {
-      const sampledFrames = await sampleVideoFrames(c.videoUrl ?? "");
-      const visualUrl = sampledFrames[0] ?? c.thumbnailUrl;
-      const vlm = await scoreVideoWithVLM(
-        productImageUrl,
-        visualUrl,
-        productAttributes.matchCriteria
-      );
-      const visualScore = computeFinalScore(c.clipScore, vlm.vlmScore, vlm.reason, vlm.sameProduct);
       const lexical = lexicalRelevanceScore(productAttributes, {
         caption: c.caption,
         url: c.videoUrl,
         author: c.author,
       });
-      if (visualScore.finalScore < 0.4 && lexical >= 0.45) {
+
+      try {
+        const sampledFrames = await sampleVideoFrames(c.videoUrl ?? "");
+        const visualUrl = sampledFrames[0] ?? c.thumbnailUrl;
+        const vlm = await scoreVideoWithVLM(
+          productImageUrl,
+          visualUrl,
+          productAttributes.matchCriteria
+        );
+        const visualScore = computeFinalScore(c.clipScore, vlm.vlmScore, vlm.reason, vlm.sameProduct);
+        if (visualScore.finalScore < 0.4 && lexical >= 0.45) {
+          return {
+            id: c.id,
+            score: computeFinalScore(
+              Math.min(0.75, lexical),
+              Math.round(Math.min(0.75, lexical) * 100),
+              "Fallback relevance: source caption and search terms match the product when visual verification is unavailable or inconclusive.",
+              lexical >= 0.6
+            ),
+          };
+        }
         return {
           id: c.id,
-          score: computeFinalScore(
-            Math.min(0.75, lexical),
-            Math.round(Math.min(0.75, lexical) * 100),
-            "Fallback relevance: source caption and search terms match the product when visual verification is unavailable or inconclusive.",
-            lexical >= 0.6
-          ),
+          score: visualScore,
+        };
+      } catch (err) {
+        logger.warn({ err, candidateId: c.id, visualUrl: c.thumbnailUrl }, "Bulk VLM scoring failed for candidate; using fallback score");
+        if (lexical >= 0.45) {
+          return {
+            id: c.id,
+            score: computeFinalScore(
+              Math.min(0.75, Math.max(c.clipScore, lexical)),
+              Math.round(Math.min(0.75, lexical) * 100),
+              "Fallback relevance: visual verification was unavailable, so the score uses thumbnail similarity and source text relevance.",
+              lexical >= 0.6
+            ),
+          };
+        }
+        return {
+          id: c.id,
+          score: computeFinalScore(c.clipScore, 0, "Visual verification unavailable; ranked by thumbnail similarity only.", false),
         };
       }
-      return {
-        id: c.id,
-        score: visualScore,
-      };
     })
   );
 
