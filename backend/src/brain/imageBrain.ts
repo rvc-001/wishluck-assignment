@@ -121,15 +121,17 @@ async function withVisionModel<T>(
       lastErr = err;
       const status = err?.status ?? err?.response?.status;
       const retryableModelError =
+        status === 429 ||
+        status === 503 ||
         status === 400 ||
         status === 404 ||
-        /model|not found|unsupported/i.test(err?.message ?? "");
+        /high demand|overloaded|unavailable|quota|model|not found|unsupported/i.test(err?.message ?? "");
 
       if (!retryableModelError) {
         throw err;
       }
 
-      logger.warn({ err, modelName, label }, "Vision model failed; trying fallback");
+      logger.warn({ err: compactError(err), modelName, label }, "Vision model failed; trying fallback");
     }
   }
 
@@ -155,6 +157,16 @@ function compactError(err: unknown): Record<string, unknown> {
       type: err.response?.data?.error?.type,
       urlHost: safeHost(err.config?.url),
       method: err.config?.method,
+    };
+  }
+  if (err && typeof err === "object") {
+    const record = err as Record<string, unknown>;
+    const message = typeof record.message === "string" ? record.message : err instanceof Error ? err.message : String(err);
+    return {
+      message,
+      status: record.status,
+      statusText: record.statusText,
+      type: record.type,
     };
   }
   return {
@@ -375,7 +387,7 @@ Rules:
           };
         }
         if (err.status === 404 || /not found|not supported|listmodels|model/i.test(err.message ?? "")) {
-          logger.warn({ err }, "Vision model unavailable during Attribute Extraction. Falling back to title attributes.");
+          logger.warn({ err: compactError(err) }, "Vision model unavailable during Attribute Extraction. Falling back to title attributes.");
           return makeTitleAttributes(title || imageUrl);
         }
         throw err;
