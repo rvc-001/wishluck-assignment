@@ -7,9 +7,12 @@ type StageKey = 'validate' | 'resolve' | 'brain' | 'collect' | 'dedup' | 'score'
 
 interface SearchResult {
   searchId: string
-  status: 'pending' | 'running' | 'done' | 'completed' | 'failed'
+  status: 'pending' | 'running' | 'done' | 'completed' | 'failed' | 'complete' | 'partial'
   results: VideoResult[]
   productInfo: ProductInfo | null
+  targetResults?: number
+  sourceKinds?: Record<string, 'organic' | 'ads' | 'unknown'>
+  dropReasons?: Record<string, number>
 }
 
 interface ProductInfo {
@@ -43,6 +46,11 @@ interface VideoResult {
   label: 'match' | 'possible' | 'discard'
   reason: string
   metaPath?: string
+  contentType?: string
+  sourceKind?: 'organic' | 'ads' | 'unknown'
+  isPaidPartnership?: boolean
+  paidMarkerDetected?: string
+  dropReason?: string
   shortlisted?: boolean
 }
 
@@ -69,13 +77,15 @@ interface ProcessSnapshot {
   scored?: number
   total?: number
   shortfall?: number
+  targetResults?: number
+  dropReasons?: Record<string, number>
 }
 
 const STAGES: Array<{ key: StageKey; label: string; description: string; seconds: number }> = [
   { key: 'validate', label: 'Validate', description: 'Input accepted', seconds: 4 },
   { key: 'resolve', label: 'Resolve', description: 'Product identity', seconds: 10 },
   { key: 'brain', label: 'Analyze', description: 'Visual signals', seconds: 22 },
-  { key: 'collect', label: 'Collect', description: 'Instagram and Meta', seconds: 60 },
+  { key: 'collect', label: 'Collect', description: 'Instagram reels', seconds: 60 },
   { key: 'dedup', label: 'Dedup', description: 'Remove repeats', seconds: 10 },
   { key: 'score', label: 'Score', description: 'Rank relevance', seconds: 28 },
   { key: 'persist', label: 'Save', description: 'Write results', seconds: 8 },
@@ -255,7 +265,7 @@ function SearchBar({
           <span aria-hidden="true" />
           Show previously seen videos
         </label>
-        <span className="microcopy">Sources: Instagram reels, Meta Ad Library</span>
+        <span className="microcopy">Source: Instagram reels with no detected paid markers</span>
       </div>
     </section>
   )
@@ -387,6 +397,7 @@ function FilterBar({
   sortMode,
   onSortModeChange,
   counts,
+  sources,
 }: {
   activeSource: string
   onSourceChange: (source: string) => void
@@ -395,8 +406,8 @@ function FilterBar({
   sortMode: SortMode
   onSortModeChange: (value: SortMode) => void
   counts: Record<string, number>
+  sources: string[]
 }) {
-  const sources = ['all', 'instagram', 'meta']
   return (
     <section className="filter-bar panel-enter">
       <div className="segmented-control" aria-label="Filter by source">
@@ -433,11 +444,12 @@ function VideoCard({
 }) {
   const scorePercent = Math.round(video.score * 100)
   const labelClass = video.label === 'match' ? 'badge-match' : video.label === 'possible' ? 'badge-possible' : 'badge-discard'
+  const sourceKind = video.sourceKind ?? (video.platform === 'meta' ? 'ads' : 'unknown')
   return (
     <article className="video-card panel-enter">
       <div className="thumbnail">
         {video.thumbnailUrl ? <img src={video.thumbnailUrl} alt="Video thumbnail" /> : <div className="thumbnail__missing">No thumbnail</div>}
-        <span>{video.platform}{video.metaPath ? ` / ${video.metaPath}` : ''}</span>
+        <span>{video.platform}{sourceKind === 'ads' ? ' / ad' : video.contentType ? ` / ${video.contentType}` : ''}</span>
       </div>
       <div className="video-card__body">
         <div className="result-row">
@@ -511,12 +523,16 @@ export default function App() {
       status: data.status,
       results: data.results ?? [],
       productInfo: data.productInfo ?? null,
+      targetResults: data.targetResults,
+      sourceKinds: data.sourceKinds,
+      dropReasons: data.dropReasons,
     })
     setShortlistedIds(new Set((data.results ?? []).filter((result: VideoResult) => result.shortlisted).map((result: VideoResult) => result.videoId ?? result.id)))
     setActiveStage('done')
     setProgressDetail('Search complete')
     setProcessSnapshot({})
     setProgressStartedAt(null)
+    setActiveSource('all')
     setError(null)
   }
 
@@ -563,8 +579,8 @@ export default function App() {
           if (evt.stage === 'collect') {
             const source = evt.source ? `${evt.source}: ` : ''
             const shortfall = typeof evt.shortfall === 'number' && evt.shortfall > 0 ? `, shortfall ${evt.shortfall}` : ''
-            setProgressDetail(`${source}${evt.got}/${evt.wanted} real candidates collected${shortfall}`)
-            setProcessSnapshot({ source: evt.source, got: evt.got, wanted: evt.wanted, shortfall: evt.shortfall })
+            setProgressDetail(`${source}${evt.got}/${evt.wanted} candidates collected${shortfall}`)
+            setProcessSnapshot({ source: evt.source, got: evt.got, wanted: evt.wanted, shortfall: evt.shortfall, targetResults: evt.targetResults, dropReasons: evt.dropReasons })
           }
           if (evt.stage === 'dedup') {
             setProgressDetail(`Deduplicated ${evt.before} candidates to ${evt.after}`)
@@ -589,11 +605,15 @@ export default function App() {
           setLoading(false)
           setSearchResult({
             searchId,
-            status: 'done',
+            status: evt.status ?? 'done',
             results: evt.results ?? [],
             productInfo: evt.productInfo ?? null,
+            targetResults: evt.targetResults,
+            sourceKinds: evt.sourceKinds,
+            dropReasons: evt.dropReasons,
           })
           setShortlistedIds(new Set())
+          setActiveSource('all')
           refreshHistory()
         }
         if (evt.stage === 'error') {
@@ -621,9 +641,12 @@ export default function App() {
   const results = useMemo(() => searchResult?.results ?? [], [searchResult?.results])
   const counts = useMemo(() => ({
     all: results.length,
-    instagram: results.filter(result => result.platform === 'instagram').length,
-    meta: results.filter(result => result.platform === 'meta').length,
+    ...Object.fromEntries(Array.from(new Set(results.map(result => result.platform))).map(source => [
+      source,
+      results.filter(result => result.platform === source).length,
+    ])),
   }), [results])
+  const sourceTabs = useMemo(() => ['all', ...Array.from(new Set(results.map(result => result.platform)))], [results])
 
   const visibleResults = useMemo(() => {
     const filtered = results.filter(result => {
@@ -640,7 +663,8 @@ export default function App() {
   }, [results, activeSource, minScore, sortMode])
 
   const matchCount = results.filter(result => result.label !== 'discard').length
-  const counterTone = results.length >= 20 ? 'good' : results.length >= 10 ? 'warn' : 'danger'
+  const targetResults = searchResult?.targetResults ?? Math.max(20, results.length)
+  const counterTone = results.length >= targetResults ? 'good' : results.length >= Math.ceil(targetResults / 2) ? 'warn' : 'danger'
   const shortlistCount = shortlistedIds.size
 
   async function persistShortlist(nextIds: Set<string>) {
@@ -693,7 +717,7 @@ export default function App() {
                 </div>
                 <div className="results-actions">
                   <strong className={`counter counter--${counterTone}`}>
-                    {results.length}/40 collected, {matchCount} usable
+                    {results.length}/{targetResults} collected, {matchCount} usable
                   </strong>
                   <span className="shortlist-count">{shortlistCount} shortlisted</span>
                   <a className={shortlistCount ? 'export-link' : 'export-link is-disabled'} href={shortlistCount ? `/api/shortlist/export?searchId=${searchResult.searchId}&format=csv` : undefined}>
@@ -712,6 +736,7 @@ export default function App() {
                 sortMode={sortMode}
                 onSortModeChange={setSortMode}
                 counts={counts}
+                sources={sourceTabs}
               />
               {visibleResults.length === 0 ? (
                 <EmptyState message="No visible results" hint="Try lowering the score filter, switching tabs, or searching a broader product." />

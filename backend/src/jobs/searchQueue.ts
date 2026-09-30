@@ -34,6 +34,59 @@ function uniqueQueries(queries: string[]): string[] {
   return result;
 }
 
+const INSTAGRAM_QUERY_STOPWORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "for",
+  "from",
+  "in",
+  "of",
+  "on",
+  "or",
+  "the",
+  "to",
+  "with",
+  "tm",
+]);
+
+function instagramTokens(value: string): string[] {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 3 && !INSTAGRAM_QUERY_STOPWORDS.has(token));
+}
+
+function tagCandidate(value: string): string {
+  return value.toLowerCase().replace(/^#/, "").replace(/[^a-z0-9_]/g, "");
+}
+
+export function buildInstagramHashtagQueries(values: string[], limit: number): string[] {
+  const tokens = uniqueQueries(values.flatMap(instagramTokens));
+  const phrases = uniqueQueries(values).flatMap((value) => {
+    const valueTokens = instagramTokens(value);
+    const compact = tagCandidate(valueTokens.join(""));
+    const candidates: string[] = [];
+    if (valueTokens.length > 1 && compact.length <= 30) {
+      candidates.push(compact);
+    }
+    for (let i = 0; i < valueTokens.length - 1; i++) {
+      const left = valueTokens[i];
+      const right = valueTokens[i + 1];
+      const pair = `${left}${right}`;
+      candidates.push(pair);
+    }
+    return candidates;
+  });
+
+  return uniqueQueries([...phrases, ...tokens])
+    .map(tagCandidate)
+    .filter((query) => query.length >= 3 && query.length <= 30)
+    .slice(0, Math.max(1, limit));
+}
+
 async function getPreviouslySeenIds(): Promise<Set<string>> {
   const prisma = getPrisma();
   const rows = await prisma.searchResult.findMany({
@@ -56,162 +109,204 @@ function platformCount(videos: Video[], platform: Video["platform"]): number {
 
 function nextQueryBatch(baseQueries: string[], attempt: number): string[] {
   if (attempt === 0) return baseQueries;
-  const broadTerms = ["review", "unboxing", "demo", "style", "product"];
-  return uniqueQueries([
-    ...baseQueries.map((query) => `${query} ${broadTerms[(attempt - 1) % broadTerms.length]}`),
-    ...baseQueries,
-  ]).slice(0, 4);
+  void attempt;
+  return uniqueQueries(baseQueries)
+    .map(tagCandidate)
+    .filter((query) => query.length >= 3 && query.length <= 30)
+    .slice(0, 4);
+}
+
+export interface SourceCollectorConfig {
+  id: Video["platform"];
+  label: string;
+  kind: "organic" | "ads" | "unknown";
+  collector: { collect: (queries: string[], opts: { target: number; seenIds: Set<string>; timeBudgetMs: number }) => Promise<CollectorResult> };
+  queries: string[];
+  target: number;
+}
+
+export interface CollectionPipelineResult {
+  videos: Video[];
+  status: "complete" | "partial";
+  targetResults: number;
+  sourceKinds: Record<string, "organic" | "ads" | "unknown">;
+  dropReasons: Record<string, number>;
+}
+
+function mergeReasons(target: Record<string, number>, source?: Record<string, number>): void {
+  for (const [reason, count] of Object.entries(source ?? {})) {
+    target[reason] = (target[reason] ?? 0) + count;
+  }
+}
+
+function totalTarget(sources: SourceCollectorConfig[]): number {
+  return sources.reduce((sum, source) => sum + source.target, 0);
+}
+
+function sourceKindsFor(sources: SourceCollectorConfig[]): Record<string, "organic" | "ads" | "unknown"> {
+  return Object.fromEntries(sources.map((source) => [source.id, source.kind]));
+}
+
+function hasProviderBudgetStop(dropReasons: Record<string, number>): boolean {
+  return Boolean(dropReasons.per_job_run_cap || dropReasons.daily_run_budget);
 }
 
 export async function collectWithRefill(params: {
-  instagram: { collect: (queries: string[], opts: { target: number; seenIds: Set<string>; timeBudgetMs: number }) => Promise<CollectorResult> };
-  meta: { collect: (queries: string[], opts: { target: number; seenIds: Set<string>; timeBudgetMs: number }) => Promise<CollectorResult> };
-  instagramQueries: string[];
-  metaQueries: string[];
-  targetPerSource: number;
+  sources: SourceCollectorConfig[];
   seenIds: Set<string>;
   searchId: string;
   timeBudgetMs: number;
-}): Promise<Video[]> {
+}): Promise<CollectionPipelineResult> {
   const started = Date.now();
   const rawVideos: Video[] = [];
-  const attemptedInstagramQueries = new Set<string>();
-  const attemptedMetaQueries = new Set<string>();
+  const attemptedQueries = new Map<string, Set<string>>();
+  const dropReasons: Record<string, number> = {};
   let attempts = 0;
 
-  while (attempts < 10 && Date.now() - started < params.timeBudgetMs) {
-    const instagramMissing = Math.max(0, params.targetPerSource - platformCount(rawVideos, "instagram"));
-    const metaMissing = Math.max(0, params.targetPerSource - platformCount(rawVideos, "meta"));
-    if (instagramMissing === 0 && metaMissing === 0) break;
+  while (attempts < env.MAX_REFILL_ROUNDS && Date.now() - started < params.timeBudgetMs) {
+    const missingBySource = params.sources.map((source) => ({
+      source,
+      missing: Math.max(0, source.target - platformCount(rawVideos, source.id)),
+    }));
+    if (missingBySource.every((entry) => entry.missing === 0)) break;
 
     const timeLeft = Math.max(1000, params.timeBudgetMs - (Date.now() - started));
-    const igQueries = nextQueryBatch(params.instagramQueries, attempts).filter((query) => {
-      if (attemptedInstagramQueries.has(query)) return false;
-      attemptedInstagramQueries.add(query);
-      return true;
+    const tasks = missingBySource.map(({ source, missing }) => {
+      const seenForSource = attemptedQueries.get(source.id) ?? new Set<string>();
+      attemptedQueries.set(source.id, seenForSource);
+      const queries = nextQueryBatch(source.queries, attempts).filter((query) => {
+        if (seenForSource.has(query)) return false;
+        seenForSource.add(query);
+        return true;
+      });
+      return { source, missing, queries };
     });
-    const metaQueries = nextQueryBatch(params.metaQueries, attempts).filter((query) => {
-      if (attemptedMetaQueries.has(query)) return false;
-      attemptedMetaQueries.add(query);
-      return true;
-    });
 
-    if (igQueries.length === 0 && metaQueries.length === 0) break;
+    const runnable = tasks.filter((task) => task.missing > 0 && task.queries.length > 0);
+    if (runnable.length === 0) break;
 
-    const [igRes, metaRes] = await Promise.allSettled([
-      igQueries.length > 0 && instagramMissing > 0
-        ? params.instagram.collect(igQueries, {
-            target: instagramMissing,
-            seenIds: params.seenIds,
-            timeBudgetMs: timeLeft,
-          })
-        : Promise.resolve({ videos: [], stats: { got: 0, wanted: instagramMissing, triedQueries: [] } } satisfies CollectorResult),
-      metaQueries.length > 0 && metaMissing > 0
-        ? params.meta.collect(metaQueries, {
-            target: metaMissing,
-            seenIds: params.seenIds,
-            timeBudgetMs: timeLeft,
-          })
-        : Promise.resolve({ videos: [], stats: { got: 0, wanted: metaMissing, triedQueries: [] } } satisfies CollectorResult),
-    ]);
+    const results = await Promise.allSettled(
+      runnable.map((task) =>
+        task.source.collector.collect(task.queries, {
+          target: task.missing,
+          seenIds: params.seenIds,
+          timeBudgetMs: timeLeft,
+        })
+      )
+    );
 
-    if (igRes.status === "fulfilled") {
-      const videos = filterPreviouslySeen(igRes.value.videos, params.seenIds);
+    for (let i = 0; i < runnable.length; i++) {
+      const task = runnable[i];
+      const result = results[i];
+      if (result.status !== "fulfilled") {
+        mergeReasons(dropReasons, { provider_error: 1 });
+        continue;
+      }
+
+      mergeReasons(dropReasons, result.value.stats.dropReasons);
+      const videos = filterPreviouslySeen(result.value.videos, params.seenIds);
       rawVideos.push(...videos);
       appendSeenIds(params.seenIds, videos);
       emitSearchEvent(params.searchId, {
+        contractVersion: 1,
         stage: "collect",
         status: "progress",
-        source: "instagram",
-        got: rawVideos.filter((video) => video.platform === "instagram").length,
-        wanted: params.targetPerSource,
+        source: task.source.id,
+        sourceKinds: sourceKindsFor(params.sources),
+        got: rawVideos.filter((video) => video.platform === task.source.id).length,
+        wanted: task.source.target,
+        targetResults: totalTarget(params.sources),
+        dropReasons,
       });
     }
 
-    if (metaRes.status === "fulfilled") {
-      const videos = filterPreviouslySeen(metaRes.value.videos, params.seenIds);
-      rawVideos.push(...videos);
-      appendSeenIds(params.seenIds, videos);
-      emitSearchEvent(params.searchId, {
-        stage: "collect",
-        status: "progress",
-        source: "meta",
-        got: rawVideos.filter((video) => video.platform === "meta").length,
-        wanted: params.targetPerSource,
-      });
-    }
-
-    if (
-      platformCount(rawVideos, "instagram") >= params.targetPerSource &&
-      platformCount(rawVideos, "meta") >= params.targetPerSource
-    ) break;
+    if (params.sources.every((source) => platformCount(rawVideos, source.id) >= source.target)) break;
     attempts++;
   }
 
+  const targetResults = totalTarget(params.sources);
+  const status = rawVideos.length >= targetResults ? "complete" : "partial";
   emitSearchEvent(params.searchId, {
+    contractVersion: 1,
     stage: "collect",
     status: "done",
+    resultStatus: status,
     got: rawVideos.length,
-    wanted: params.targetPerSource * 2,
-    shortfall: Math.max(0, params.targetPerSource * 2 - rawVideos.length),
+    wanted: targetResults,
+    targetResults,
+    sourceKinds: sourceKindsFor(params.sources),
+    dropReasons,
+    shortfall: Math.max(0, targetResults - rawVideos.length),
   });
 
-  return rawVideos;
+  return {
+    videos: rawVideos,
+    status,
+    targetResults,
+    sourceKinds: sourceKindsFor(params.sources),
+    dropReasons,
+  };
 }
 
 export async function dedupWithSourceRefill(params: {
   rawVideos: Video[];
-  instagram: { collect: (queries: string[], opts: { target: number; seenIds: Set<string>; timeBudgetMs: number }) => Promise<CollectorResult> };
-  meta: { collect: (queries: string[], opts: { target: number; seenIds: Set<string>; timeBudgetMs: number }) => Promise<CollectorResult> };
-  instagramQueries: string[];
-  metaQueries: string[];
-  targetPerSource: number;
+  sources: SourceCollectorConfig[];
   seenIds: Set<string>;
   searchId: string;
   timeBudgetMs: number;
   runDedup: (videos: Video[]) => Promise<Video[]>;
-}): Promise<Video[]> {
+  dropReasons?: Record<string, number>;
+}): Promise<CollectionPipelineResult> {
   const started = Date.now();
   let rawVideos = params.rawVideos;
   let dedupedVideos = await params.runDedup(rawVideos);
+  const dropReasons = { ...(params.dropReasons ?? {}) };
   let attempts = 0;
 
-  while (attempts < 5 && Date.now() - started < params.timeBudgetMs) {
-    const instagramMissing = Math.max(0, params.targetPerSource - platformCount(dedupedVideos, "instagram"));
-    const metaMissing = Math.max(0, params.targetPerSource - platformCount(dedupedVideos, "meta"));
-    if (instagramMissing === 0 && metaMissing === 0) break;
+  while (attempts < env.MAX_REFILL_ROUNDS && Date.now() - started < params.timeBudgetMs) {
+    if (hasProviderBudgetStop(dropReasons)) break;
+
+    const missingBySource = params.sources.map((source) => ({
+      source,
+      missing: Math.max(0, source.target - platformCount(dedupedVideos, source.id)),
+    }));
+    if (missingBySource.every((entry) => entry.missing === 0)) break;
 
     emitSearchEvent(params.searchId, {
+      contractVersion: 1,
       stage: "collect",
       status: "progress",
       source: "post-dedup-refill",
       got: dedupedVideos.length,
-      wanted: params.targetPerSource * 2,
-      shortfall: instagramMissing + metaMissing,
+      wanted: totalTarget(params.sources),
+      targetResults: totalTarget(params.sources),
+      sourceKinds: sourceKindsFor(params.sources),
+      dropReasons,
+      shortfall: missingBySource.reduce((sum, entry) => sum + entry.missing, 0),
     });
 
     const timeLeft = Math.max(1000, params.timeBudgetMs - (Date.now() - started));
-    const [igRefill, metaRefill] = await Promise.allSettled([
-      instagramMissing > 0
-        ? params.instagram.collect(nextQueryBatch(params.instagramQueries, attempts + 1), {
-            target: instagramMissing,
-            seenIds: params.seenIds,
-            timeBudgetMs: timeLeft,
-          })
-        : Promise.resolve({ videos: [], stats: { got: 0, wanted: 0, triedQueries: [] } } satisfies CollectorResult),
-      metaMissing > 0
-        ? params.meta.collect(nextQueryBatch(params.metaQueries, attempts + 1), {
-            target: metaMissing,
-            seenIds: params.seenIds,
-            timeBudgetMs: timeLeft,
-          })
-        : Promise.resolve({ videos: [], stats: { got: 0, wanted: 0, triedQueries: [] } } satisfies CollectorResult),
-    ]);
+    const runnable = missingBySource.filter((entry) => entry.missing > 0);
+    const results = await Promise.allSettled(
+      runnable.map(({ source, missing }) =>
+        source.collector.collect(nextQueryBatch(source.queries, attempts + 1), {
+          target: missing,
+          seenIds: params.seenIds,
+          timeBudgetMs: timeLeft,
+        })
+      )
+    );
 
-    const refill = [
-      ...(igRefill.status === "fulfilled" ? filterPreviouslySeen(igRefill.value.videos, params.seenIds) : []),
-      ...(metaRefill.status === "fulfilled" ? filterPreviouslySeen(metaRefill.value.videos, params.seenIds) : []),
-    ];
+    const refill: Video[] = [];
+    for (let i = 0; i < runnable.length; i++) {
+      const result = results[i];
+      if (result.status !== "fulfilled") {
+        mergeReasons(dropReasons, { provider_error: 1 });
+        continue;
+      }
+      mergeReasons(dropReasons, result.value.stats.dropReasons);
+      refill.push(...filterPreviouslySeen(result.value.videos, params.seenIds));
+    }
     appendSeenIds(params.seenIds, refill);
 
     rawVideos = [...rawVideos, ...refill];
@@ -219,11 +314,17 @@ export async function dedupWithSourceRefill(params: {
     attempts++;
   }
 
-  return [
-    ...dedupedVideos.filter((video) => video.platform === "instagram").slice(0, params.targetPerSource),
-    ...dedupedVideos.filter((video) => video.platform === "meta").slice(0, params.targetPerSource),
-    ...dedupedVideos.filter((video) => video.platform !== "instagram" && video.platform !== "meta"),
-  ];
+  const videos = params.sources.flatMap((source) =>
+    dedupedVideos.filter((video) => video.platform === source.id).slice(0, source.target)
+  );
+  const targetResults = totalTarget(params.sources);
+  return {
+    videos,
+    status: videos.length >= targetResults ? "complete" : "partial",
+    targetResults,
+    sourceKinds: sourceKindsFor(params.sources),
+    dropReasons,
+  };
 }
 
 export function getSearchQueue(): Queue {
@@ -308,51 +409,78 @@ export async function processSearchJob(
 
         const instagramQueries =
           treatAsKeyword
-            ? uniqueQueries([effectiveQuery, ...brainData.attributes.searchQueries]).slice(0, Math.max(1, env.KEYWORD_INSTAGRAM_QUERIES))
-            : uniqueQueries(brainData.attributes.searchQueries).slice(0, Math.max(1, env.KEYWORD_INSTAGRAM_QUERIES));
+            ? buildInstagramHashtagQueries([effectiveQuery, ...brainData.attributes.searchQueries], env.KEYWORD_INSTAGRAM_QUERIES)
+            : buildInstagramHashtagQueries(brainData.attributes.searchQueries, env.KEYWORD_INSTAGRAM_QUERIES);
         const metaQueries =
           treatAsKeyword
             ? [effectiveQuery]
             : uniqueQueries([product.title, ...brainData.attributes.adKeywords]).slice(0, 2);
 
-        logger.info({ instagramQueries, metaQueries }, "Collector query plan");
+        const activeSources = new Set(env.SEARCH_SOURCES);
+        const sources: SourceCollectorConfig[] = [];
+        if (activeSources.has("instagram")) {
+          sources.push({
+            id: "instagram",
+            label: "Instagram Reels",
+            kind: "organic",
+            collector: new InstagramCollector(),
+            queries: instagramQueries,
+            target: env.TARGET_RESULTS,
+          });
+        }
+        if (activeSources.has("meta")) {
+          sources.push({
+            id: "meta",
+            label: "Meta Ad Library",
+            kind: "ads",
+            collector: new MetaCollector(),
+            queries: metaQueries,
+            target: env.TARGET_RESULTS,
+          });
+        }
+        if (sources.length === 0) {
+          throw new Error("SEARCH_SOURCES did not enable any supported collectors.");
+        }
 
-        const igCollector = new InstagramCollector();
-        const metaCollector = new MetaCollector();
+        logger.info(
+          { sources: sources.map((source) => source.id), instagramQueries, metaQueries, target: env.TARGET_RESULTS },
+          "Collector query plan"
+        );
+
         const seenIds = showSeen ? new Set<string>() : await getPreviouslySeenIds();
 
-        let rawVideos = await collectWithRefill({
-          instagram: igCollector,
-          meta: metaCollector,
-          instagramQueries,
-          metaQueries,
-          targetPerSource: 20,
+        const collectionResult = await collectWithRefill({
+          sources,
           seenIds,
           searchId,
           timeBudgetMs: 60000,
         });
+        let rawVideos = collectionResult.videos;
 
         await updateProgress(60);
 
         // --- PHASE 4: DEDUPLICATION ---
         const { runDedupPipeline } = await import("../dedup");
-        const dedupedVideos = await dedupWithSourceRefill({
+        const dedupResult = await dedupWithSourceRefill({
           rawVideos,
-          instagram: igCollector,
-          meta: metaCollector,
-          instagramQueries,
-          metaQueries,
-          targetPerSource: 20,
+          sources,
           seenIds,
           searchId,
           timeBudgetMs: 60000,
           runDedup: runDedupPipeline,
+          dropReasons: collectionResult.dropReasons,
         });
+        const dedupedVideos = dedupResult.videos;
         emitSearchEvent(searchId, {
+          contractVersion: 1,
           stage: "dedup",
           status: "done",
           before: rawVideos.length,
           after: dedupedVideos.length,
+          resultStatus: dedupResult.status,
+          targetResults: dedupResult.targetResults,
+          sourceKinds: dedupResult.sourceKinds,
+          dropReasons: dedupResult.dropReasons,
         });
         await updateProgress(70);
 
@@ -371,10 +499,13 @@ export async function processSearchJob(
           env.VLM_TOP_N
         );
         emitSearchEvent(searchId, {
+          contractVersion: 1,
           stage: "score",
           status: "done",
           scored: scoredResults.length,
           total: dedupedVideos.length,
+          resultStatus: dedupResult.status,
+          targetResults: dedupResult.targetResults,
         });
         await updateProgress(85);
 
@@ -397,7 +528,7 @@ export async function processSearchJob(
           if (!video) continue;
 
           // Upsert Video
-          const dbVideo = await prisma.video.upsert({
+          const dbVideo = await (prisma as any).video.upsert({
             where: {
               platform_platformId: { platform: video.platform, platformId: video.platformId }
             },
@@ -407,18 +538,34 @@ export async function processSearchJob(
               caption: video.caption,
               thumbPHash: video.thumbPHash ?? "",
               captionSimhash: video.captionSimhash ?? "",
+              providerMediaId: video.providerMediaId,
+              providerCreatorId: video.providerCreatorId,
+              creatorHandle: video.creatorHandle,
+              contentType: video.contentType ?? "unknown",
+              sourceKind: video.sourceKind ?? (video.platform === "meta" ? "ads" : "unknown"),
+              isPaidPartnership: video.isPaidPartnership ?? false,
+              paidMarkerDetected: video.paidMarkerDetected,
+              dropReason: video.dropReason,
             },
             create: {
               platform: video.platform,
               platformId: video.platformId,
+              providerMediaId: video.providerMediaId,
+              providerCreatorId: video.providerCreatorId,
               url: video.url,
               thumbnailUrl: video.thumbnailUrl,
               caption: video.caption,
+              creatorHandle: video.creatorHandle,
               urlHash: video.urlHash || sha256(normalizeUrl(video.url || `${video.platform}:${video.platformId}`)),
               thumbPHash: video.thumbPHash ?? "",
               captionSimhash: video.captionSimhash ?? "",
               embedding: Buffer.from(JSON.stringify(video.embedding ?? [])),
               metaPath: video.metaPath,
+              contentType: video.contentType ?? "unknown",
+              sourceKind: video.sourceKind ?? (video.platform === "meta" ? "ads" : "unknown"),
+              isPaidPartnership: video.isPaidPartnership ?? false,
+              paidMarkerDetected: video.paidMarkerDetected,
+              dropReason: video.dropReason,
             }
           });
 
@@ -467,10 +614,20 @@ export async function processSearchJob(
             label: scored.score.label,
             reason: scored.score.reason,
             metaPath: video.metaPath,
+            contentType: video.contentType ?? "unknown",
+            sourceKind: video.sourceKind ?? (video.platform === "meta" ? "ads" : "unknown"),
+            isPaidPartnership: video.isPaidPartnership ?? false,
+            paidMarkerDetected: video.paidMarkerDetected,
+            dropReason: video.dropReason,
           }];
         });
         emitSearchEvent(searchId, {
+          contractVersion: 1,
           stage: "done",
+          status: dedupResult.status,
+          targetResults: dedupResult.targetResults,
+          sourceKinds: dedupResult.sourceKinds,
+          dropReasons: dedupResult.dropReasons,
           results: responseResults,
           productInfo: {
             title: product.title,

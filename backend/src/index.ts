@@ -1,5 +1,7 @@
 import dotenv from "dotenv";
 dotenv.config({ path: "../.env" });
+import fs from "fs";
+import path from "path";
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
@@ -7,6 +9,7 @@ import pinoHttp from "pino-http";
 import rateLimit from "express-rate-limit";
 import { z } from "zod";
 import { env } from "./lib/env";
+import { validateStartupConfig } from "./lib/env";
 import { logger } from "./lib/logger";
 import { getRedis } from "./lib/redis";
 import { startSearchWorker } from "./jobs/searchQueue";
@@ -46,12 +49,25 @@ async function healthPayload() {
     /* Redis may not be running in dev without Docker */
   }
 
+  let instagramProviderShape: "ok" | "warning" = "ok";
+  try {
+    const { apifyInstagramCanary } = await import("./collectors/instagram");
+    const fixturePath = path.resolve(__dirname, "../fixtures/instagram-sample.json");
+    const rows = JSON.parse(fs.readFileSync(fixturePath, "utf-8"));
+    instagramProviderShape = apifyInstagramCanary(rows[0]).ok ? "ok" : "warning";
+  } catch {
+    instagramProviderShape = "warning";
+  }
+
   return {
     status: "ok",
     timestamp: new Date().toISOString(),
     redis: redisOk ? "connected" : "unavailable",
     queueMode: env.QUEUE_MODE,
     useFixtures: env.USE_FIXTURES,
+    sources: env.SEARCH_SOURCES,
+    targetResults: env.TARGET_RESULTS,
+    instagramProviderShape,
   };
 }
 
@@ -172,11 +188,16 @@ app.get("/api/shortlist/export", async (req, res, next) => {
       label: row.label,
       reason: row.reason,
       metaPath: row.video.metaPath,
+      contentType: (row.video as any).contentType ?? "unknown",
+      sourceKind: (row.video as any).sourceKind ?? (row.video.platform === "meta" ? "ads" : "unknown"),
+      isPaidPartnership: (row.video as any).isPaidPartnership ?? false,
+      paidMarkerDetected: (row.video as any).paidMarkerDetected,
+      dropReason: (row.video as any).dropReason,
     }));
 
     if (format === "csv") {
       const escape = (value: unknown) => `"${String(value ?? "").replace(/"/g, '""')}"`;
-      const header = ["platform", "platformId", "url", "thumbnailUrl", "caption", "score", "label", "reason", "metaPath"] as const;
+      const header = ["platform", "platformId", "url", "thumbnailUrl", "caption", "score", "label", "reason", "metaPath", "contentType", "sourceKind", "isPaidPartnership", "paidMarkerDetected", "dropReason"] as const;
       const lines = [
         header.join(","),
         ...payload.map((row) => header.map((key) => escape(row[key])).join(",")),
@@ -214,6 +235,7 @@ app.use(
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 async function main() {
+  validateStartupConfig();
   // Start BullMQ worker (Phase 0.8)
   try {
     const worker = startSearchWorker();

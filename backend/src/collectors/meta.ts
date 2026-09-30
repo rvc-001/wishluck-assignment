@@ -101,6 +101,8 @@ function normalizeMetaOfficial(item: MetaAdItem): Video {
     caption: (item.ad_creative_bodies ?? []).join(" "),
     author: item.page_name,
     metaPath: "official",
+    contentType: "video",
+    sourceKind: "ads",
     createdAt: item.ad_delivery_start_time,
   };
 }
@@ -185,6 +187,8 @@ function normalizeMetaFallback(item: ApifyMetaItem, index: number): Video | null
     caption,
     author: firstNonEmpty(item.advertiserName, item.pageName, item.page_name, item.pageID),
     metaPath: "fallback",
+    contentType: "video",
+    sourceKind: "ads",
     createdAt: firstNonEmpty(item.startDate, item.startDateFormatted),
   };
 }
@@ -204,6 +208,7 @@ function expandFixtureVideos(videos: Video[], target: number): Video[] {
       thumbnailUrl: base.thumbnailUrl.replace(/seed\/([^/]+)/, `seed/$1-${suffix}`),
       caption: uniqueTerms,
       metaPath: base.metaPath ?? "fallback",
+      sourceKind: "ads",
     });
   }
   return expanded;

@@ -4,7 +4,9 @@
 
 ## Overview
 
-The Product Video Discovery Dashboard is an end-to-end, full-stack application designed to automatically discover, analyze, and shortlist highly relevant product videos from social media platforms (Instagram and Meta Ad Library). By leveraging advanced Large Vision-Language Models (VLMs) and rigorous deduplication pipelines, the system acts as an intelligent agent to curate the best ad creative and user-generated content for any given product.
+The Product Video Discovery Dashboard is an end-to-end, full-stack application designed to automatically discover, analyze, and shortlist highly relevant product videos from Instagram Reels. By leveraging advanced Large Vision-Language Models (VLMs), eligibility filters, and deduplication pipelines, the system curates Reels with no detected paid markers for any given product.
+
+The organic claim is best-effort: scraped data cannot prove whether a post was boosted or undisclosed paid content. The app filters out non-Reels and obvious paid markers such as exact `#ad`, `#sponsored`, paid partnership flags, and related phrases, then records drop reasons for auditability.
 
 ---
 
@@ -14,7 +16,7 @@ The Product Video Discovery Dashboard is an end-to-end, full-stack application d
 Upon entering a product keyword, URL, or uploading an image, the backend orchestrates a multi-step background job:
 - **Product Resolution**: Resolves the product details and generates optimized search queries.
 - **Image Brain**: Extracts core attributes and generates search embeddings.
-- **Multi-Source Collection**: Simultaneously scrapes videos from Instagram Reels and the Meta Ad Library using Apify integrations and official APIs.
+- **Configurable Collection**: Defaults to Instagram Reels only (`SEARCH_SOURCES=instagram`). Meta Ad Library remains available as an optional ads comparison source, but is not treated as organic content.
 
 ### 2. Multi-Layer Deduplication
 To ensure diverse results, the system employs a robust deduplication pipeline:
@@ -50,8 +52,16 @@ The application requires specific environment variables to function correctly. C
 
 ### API Keys
 - `GEMINI_API_KEY`: Required for the Image Brain and VLM scoring. Obtain from [Google AI Studio](https://aistudio.google.com/app/apikey).
-- `APIFY_API_TOKEN`: Required for scraping Instagram and the Meta fallback. Obtain from [Apify](https://console.apify.com/account/integrations).
-- `META_AD_LIBRARY_ACCESS_TOKEN`: Required for official Meta API queries.
+- `APIFY_API_TOKEN`: Required for live Instagram Apify collection unless fixture mode is enabled. Obtain from [Apify](https://console.apify.com/account/integrations).
+- `SEARCH_SOURCES`: Defaults to `instagram`. Add `meta` only for ads comparison mode.
+- `TARGET_RESULTS`: Defaults to `20` and is sent to the UI/API so counts are not hardcoded.
+- `META_AD_LIBRARY_ACCESS_TOKEN`: Optional. Required only when Meta ads mode uses official Meta API queries.
+
+### Source Caveats
+- Meta Ad Library is ads-only and should not be used as an organic Instagram source.
+- Instagram Graph API hashtag search is an official alternative, but requires eligible professional account access/app review and has restrictive hashtag-query limits, so it is not the default provider.
+- Meta Content Library is access-controlled and primarily intended for approved research access, so it is documented as a future alternative rather than the default integration.
+- Apify scraping can be affected by Instagram changes, rate limits, ToS concerns, and usage cost. The backend caches raw provider responses, applies run caps, and returns partial results rather than padding or hanging.
 
 ---
 

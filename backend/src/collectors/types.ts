@@ -7,13 +7,21 @@ export interface Video {
   id: string;
   platform: "instagram" | "meta" | "tiktok";
   platformId: string;
+  providerMediaId?: string;
+  providerCreatorId?: string;
   url: string;
   thumbnailUrl: string;
   caption: string;
   author?: string;
+  creatorHandle?: string;
   likes?: number;
   views?: number;
   metaPath?: "official" | "fallback";
+  contentType?: "reel" | "video" | "image" | "carousel" | "unknown";
+  sourceKind?: "organic" | "ads" | "unknown";
+  isPaidPartnership?: boolean;
+  paidMarkerDetected?: string;
+  dropReason?: string;
   createdAt?: string;
   urlHash?: string;
   thumbPHash?: string;
@@ -26,6 +34,12 @@ export interface CollectorStats {
   wanted: number;
   triedQueries: string[];
   metaPath?: "official" | "fallback";
+  targetResults?: number;
+  status?: "complete" | "partial";
+  sourceKinds?: Record<string, "organic" | "ads" | "unknown">;
+  dropReasons?: Record<string, number>;
+  cacheHits?: number;
+  liveRuns?: number;
 }
 
 export interface CollectorResult {

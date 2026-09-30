@@ -17,6 +17,10 @@ function video(overrides: Partial<Video>): Video {
     caption: overrides.caption ?? "floral midi dress demo",
     author: overrides.author,
     metaPath: overrides.metaPath,
+    providerMediaId: overrides.providerMediaId,
+    providerCreatorId: overrides.providerCreatorId,
+    contentType: overrides.contentType,
+    sourceKind: overrides.sourceKind,
     thumbPHash: overrides.thumbPHash,
     captionSimhash: overrides.captionSimhash,
     embedding: overrides.embedding,
@@ -42,6 +46,15 @@ describe("deduplication", () => {
     expect(result).toHaveLength(1);
   });
 
+  it("provider-media-id-collision deduplicates reposted media with different URLs", () => {
+    const result = dedupExact([
+      video({ platformId: "a", providerMediaId: "media-1", url: "https://example.com/a" }),
+      video({ platformId: "b", providerMediaId: "media-1", url: "https://example.com/b" }),
+    ]);
+
+    expect(result).toHaveLength(1);
+  });
+
   it("resized-thumbnail-near-dup removes pHash-near duplicate thumbnails", async () => {
     const result = await runDedupPipeline([
       video({ platformId: "a", thumbPHash: "1111000011110000111100001111000011110000111100001111000011110000" }),
@@ -60,7 +73,7 @@ describe("deduplication", () => {
     expect(result).toHaveLength(1);
   });
 
-  it("refill-loop-tops-up after initial shortfall", async () => {
+  it("refill-loop-returns-partial when grounded queries are exhausted", async () => {
     let calls = 0;
     const makeCollector = (platform: "instagram" | "meta") => ({
       collect: async (_queries: string[], opts: { target: number }) => {
@@ -76,17 +89,17 @@ describe("deduplication", () => {
     });
 
     const result = await collectWithRefill({
-      instagram: makeCollector("instagram"),
-      meta: makeCollector("meta"),
-      instagramQueries: ["dress"],
-      metaQueries: ["dress"],
-      targetPerSource: 5,
+      sources: [
+        { id: "instagram", label: "Instagram", kind: "organic", collector: makeCollector("instagram"), queries: ["dress"], target: 5 },
+        { id: "meta", label: "Meta", kind: "ads", collector: makeCollector("meta"), queries: ["dress"], target: 5 },
+      ],
       seenIds: new Set(),
       searchId: "test-search",
       timeBudgetMs: 5000,
     });
 
-    expect(result.length).toBeGreaterThanOrEqual(10);
+    expect(result.videos).toHaveLength(6);
+    expect(result.status).toBe("partial");
   });
 
   it("cross-search-exclusion hides previously seen videos by default", () => {

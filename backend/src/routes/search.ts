@@ -178,6 +178,7 @@ router.get("/:id", async (req: Request, res: Response) => {
   }
 
   return res.json({
+    contractVersion: 1,
     searchId: id,
     status: search.status === "completed" ? "done" : search.status,
     results: search.results.map((r: any) => ({
@@ -192,8 +193,20 @@ router.get("/:id", async (req: Request, res: Response) => {
       label: r.label,
       reason: r.reason,
       metaPath: r.video.metaPath,
+      contentType: r.video.contentType ?? "unknown",
+      sourceKind: r.video.sourceKind ?? (r.video.platform === "meta" ? "ads" : "unknown"),
+      isPaidPartnership: r.video.isPaidPartnership ?? false,
+      paidMarkerDetected: r.video.paidMarkerDetected,
+      dropReason: r.video.dropReason,
       shortlisted: r.shortlisted,
     })),
+    targetResults: env.TARGET_RESULTS,
+    sourceKinds: Object.fromEntries(
+      search.results.map((r: any) => [
+        r.video.platform,
+        r.video.sourceKind ?? (r.video.platform === "meta" ? "ads" : "unknown"),
+      ])
+    ),
     productInfo: {
       title: search.productTitle,
       imageUrl: search.imageUrl,
@@ -271,11 +284,16 @@ router.get("/../shortlist/export", async (req: Request, res: Response) => {
     label: row.label,
     reason: row.reason,
     metaPath: row.video.metaPath,
+    contentType: (row.video as any).contentType ?? "unknown",
+    sourceKind: (row.video as any).sourceKind ?? (row.video.platform === "meta" ? "ads" : "unknown"),
+    isPaidPartnership: (row.video as any).isPaidPartnership ?? false,
+    paidMarkerDetected: (row.video as any).paidMarkerDetected,
+    dropReason: (row.video as any).dropReason,
   }));
 
   if (format === "csv") {
     const escape = (value: unknown) => `"${String(value ?? "").replace(/"/g, '""')}"`;
-    const header = ["platform", "platformId", "url", "thumbnailUrl", "caption", "score", "label", "reason", "metaPath"];
+    const header = ["platform", "platformId", "url", "thumbnailUrl", "caption", "score", "label", "reason", "metaPath", "contentType", "sourceKind", "isPaidPartnership", "paidMarkerDetected", "dropReason"];
     const lines = [
       header.join(","),
       ...payload.map((row) => header.map((key) => escape(row[key as keyof typeof row])).join(",")),

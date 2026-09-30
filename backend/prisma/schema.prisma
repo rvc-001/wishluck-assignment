@@ -23,14 +23,22 @@ model Video {
   id             String         @id @default(cuid())
   platform       String         // "instagram" | "meta" | "tiktok"
   platformId     String
+  providerMediaId String?
+  providerCreatorId String?
   url            String         @default("")
   thumbnailUrl   String         @default("")
   caption        String         @default("")
+  creatorHandle  String?
   urlHash        String         @unique
   thumbPHash     String         @default("")
   captionSimhash String         @default("")
   embedding      Bytes          // bytea in PostgreSQL
   metaPath       String?        // "official" | "fallback"
+  contentType    String?        @default("unknown")
+  sourceKind     String?        @default("unknown")
+  isPaidPartnership Boolean     @default(false)
+  paidMarkerDetected String?
+  dropReason     String?
   createdAt      DateTime       @default(now())
   results        SearchResult[]
 

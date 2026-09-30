@@ -1,31 +1,36 @@
 /**
- * Instagram Reels Collector (Phase 3A)
- * Uses Apify's instagram-reel-scraper actor behind the Collector interface.
- * In USE_FIXTURES=true mode, returns saved fixture data without live API calls.
+ * Instagram Reels Collector.
+ * The Apify actor is treated as a provider adapter: raw rows are normalized here,
+ * then shared eligibility decides whether a row is a usable no-detected-paid-marker Reel.
  */
 
 import axios from "axios";
 import path from "path";
 import fs from "fs";
 import { v4 as uuidv4 } from "uuid";
+import { Collector, CollectorOptions, CollectorResult, Video, makeSeenKey } from "./types";
 import {
-  Collector,
-  CollectorOptions,
-  CollectorResult,
-  Video,
-  makeSeenKey,
-} from "./types";
+  NormalizedProviderItem,
+  evaluateOrganicReel,
+  hashtagsFor,
+  incrementDrop,
+  underCreatorCap,
+} from "./organicEligibility";
+import {
+  ProviderRunBudget,
+  createProviderRunBudget,
+  readProviderCache,
+  tryConsumeProviderRun,
+  writeProviderCache,
+} from "./providerRuntime";
 import { env } from "../lib/env";
 import { logger } from "../lib/logger";
 import { withRetry, sleep } from "../lib/utils";
 
-// Rate limit compliance: Apify Instagram scraper — max 50 results/run recommended
-// https://apify.com/apify/instagram-reel-scraper
-
 const APIFY_BASE_URL = "https://api.apify.com/v2";
 const ACTOR_ID = "apify~instagram-scraper";
 
-interface ApifyRawItem {
+export interface ApifyRawItem {
   error?: string;
   errorDescription?: string;
   id?: string;
@@ -42,14 +47,22 @@ interface ApifyRawItem {
   videoUrl?: string;
   type?: string;
   productType?: string;
+  product_type?: string;
+  mediaType?: string;
+  __typename?: string;
+  isPaidPartnership?: boolean;
+  paidPartnership?: boolean;
+  sponsorship?: unknown;
   caption?: string | { text?: string };
+  hashtags?: string[];
   likesCount?: number;
   likes?: number;
   videoViewCount?: number;
   views?: number;
   ownerUsername?: string;
   author?: string;
-  owner?: { username?: string };
+  ownerId?: string;
+  owner?: { username?: string; id?: string };
   timestamp?: string;
   takenAtIso?: string;
 }
@@ -62,27 +75,75 @@ function fixtureScope(queries: string[]): string {
   return normalizeTag(queries[0] ?? "fixture") || "fixture";
 }
 
-function normalizeApifyItem(raw: ApifyRawItem): Video | null {
+function inferContentType(raw: ApifyRawItem, url: string): Video["contentType"] {
+  const productType = (raw.productType ?? raw.product_type ?? "").toLowerCase();
+  const type = (raw.type ?? raw.mediaType ?? raw.__typename ?? "").toLowerCase();
+  if (["clips", "reel", "reels"].includes(productType) || url.includes("/reel/")) return "reel";
+  if (type.includes("sidecar") || type.includes("carousel") || productType.includes("carousel")) return "carousel";
+  if (type.includes("image") || productType.includes("feed_photo")) return "image";
+  if (type.includes("video") || productType.includes("video")) return "video";
+  return "unknown";
+}
+
+export function normalizeApifyInstagramItem(raw: ApifyRawItem, paginationDepth = 0): NormalizedProviderItem | null {
   if (raw.error || raw.errorDescription) return null;
   const platformId = raw.shortCode ?? raw.shortcode ?? raw.code ?? raw.platformId ?? raw.id ?? "";
   if (!platformId) return null;
-  const caption =
-    typeof raw.caption === "string" ? raw.caption : raw.caption?.text ?? "";
+
+  const caption = typeof raw.caption === "string" ? raw.caption : raw.caption?.text ?? "";
   const author = raw.ownerUsername ?? raw.owner?.username ?? raw.author?.replace(/^@/, "");
   const thumbnailUrl = raw.displayUrl ?? raw.thumbnailUrl ?? raw.thumbnail ?? raw.imageUrl ?? raw.videoThumbnail ?? "";
   const url = raw.url ?? `https://www.instagram.com/reel/${platformId}/`;
 
   return {
-    id: uuidv4(),
-    platform: "instagram",
+    id: raw.id ?? platformId,
     platformId,
+    providerMediaId: raw.id ?? platformId,
+    providerCreatorId: raw.ownerId ?? raw.owner?.id ?? author,
+    creatorHandle: author ? `@${author.replace(/^@/, "")}` : undefined,
     url,
     thumbnailUrl,
     caption,
-    author: author ? `@${author}` : undefined,
+    hashtags: hashtagsFor(caption, raw.hashtags ?? []),
+    contentType: inferContentType(raw, url),
+    productType: raw.productType ?? raw.product_type,
+    paidPartnershipFlag: Boolean(raw.isPaidPartnership || raw.paidPartnership || raw.sponsorship),
     likes: raw.likesCount ?? raw.likes,
     views: raw.videoViewCount ?? raw.views,
     createdAt: raw.timestamp ?? raw.takenAtIso,
+    paginationDepth,
+  };
+}
+
+export function apifyInstagramCanary(raw: ApifyRawItem): { ok: boolean; missing: string[] } {
+  const missing: string[] = [];
+  if (!(raw.shortCode ?? raw.shortcode ?? raw.code ?? raw.platformId ?? raw.id)) missing.push("platformId");
+  if (!(raw.url ?? raw.productType ?? raw.product_type ?? raw.type ?? raw.mediaType ?? raw.__typename)) {
+    missing.push("content identity");
+  }
+  if (!(raw.ownerUsername ?? raw.owner?.username ?? raw.author)) missing.push("creator");
+  return { ok: missing.length === 0, missing };
+}
+
+function videoFromEligibleItem(item: NormalizedProviderItem, paidMarkerDetected?: string): Video {
+  return {
+    id: uuidv4(),
+    platform: "instagram",
+    platformId: item.platformId,
+    providerMediaId: item.providerMediaId,
+    providerCreatorId: item.providerCreatorId,
+    url: item.url,
+    thumbnailUrl: item.thumbnailUrl,
+    caption: item.caption,
+    author: item.creatorHandle,
+    creatorHandle: item.creatorHandle,
+    likes: item.likes,
+    views: item.views,
+    contentType: "reel",
+    sourceKind: "organic",
+    isPaidPartnership: false,
+    paidMarkerDetected,
+    createdAt: item.createdAt,
   };
 }
 
@@ -97,6 +158,7 @@ function expandFixtureVideos(videos: Video[], target: number): Video[] {
       ...base,
       id: uuidv4(),
       platformId: `${base.platformId}-fixture-${suffix}`,
+      providerMediaId: `${base.providerMediaId ?? base.platformId}-fixture-${suffix}`,
       url: `${base.url.replace(/\/$/, "")}?fixture=${suffix}`,
       thumbnailUrl: base.thumbnailUrl.replace(/seed\/([^/]+)/, `seed/$1-${suffix}`),
       caption: uniqueTerms,
@@ -106,29 +168,39 @@ function expandFixtureVideos(videos: Video[], target: number): Video[] {
 }
 
 export class InstagramCollector implements Collector {
-  async collect(
-    queries: string[],
-    opts: CollectorOptions
-  ): Promise<CollectorResult> {
+  private budget: ProviderRunBudget;
+
+  constructor() {
+    this.budget = createProviderRunBudget("apify:instagram");
+  }
+
+  async collect(queries: string[], opts: CollectorOptions): Promise<CollectorResult> {
     const start = Date.now();
     const triedQueries: string[] = [];
     const triedTags = new Set<string>();
     const videos: Video[] = [];
     const localSeen = new Set(opts.seenIds);
+    const creatorCounts = new Map<string, number>();
+    const dropReasons: Record<string, number> = {};
+    let cacheHits = 0;
+    let liveRuns = 0;
 
-    // 0.9 — Fixture mode
     if (env.USE_FIXTURES) {
       logger.info("Instagram collector: USE_FIXTURES=true, loading fixture data");
-      const fixturePath = path.resolve(
-        __dirname,
-        "../../fixtures/instagram-sample.json"
-      );
-      const raw: ApifyRawItem[] = JSON.parse(
-        fs.readFileSync(fixturePath, "utf-8")
-      );
+      const fixturePath = path.resolve(__dirname, "../../fixtures/instagram-sample.json");
+      const raw: ApifyRawItem[] = JSON.parse(fs.readFileSync(fixturePath, "utf-8"));
       const normalized = raw
-        .map(normalizeApifyItem)
-        .filter((v): v is Video => v !== null);
+        .map((item) => normalizeApifyInstagramItem(item))
+        .filter((item): item is NormalizedProviderItem => item !== null)
+        .map((item) => {
+          const result = evaluateOrganicReel(item);
+          if (!result.item) {
+            incrementDrop(dropReasons, result.dropReason);
+            return null;
+          }
+          return videoFromEligibleItem(result.item, result.paidMarkerDetected);
+        })
+        .filter((video): video is Video => video !== null);
       const scope = fixtureScope(queries);
       const expanded = expandFixtureVideos(normalized, opts.target).map((video) => ({
         ...video,
@@ -141,84 +213,155 @@ export class InstagramCollector implements Collector {
           got: expanded.length,
           wanted: opts.target,
           triedQueries: ["fixture"],
-          metaPath: undefined,
+          targetResults: opts.target,
+          status: expanded.length >= opts.target ? "complete" : "partial",
+          sourceKinds: { instagram: "organic" },
+          dropReasons,
+          cacheHits: 0,
+          liveRuns: 0,
         },
       };
     }
 
     if (!env.APIFY_API_TOKEN) {
-      logger.warn("APIFY_API_TOKEN not set — Instagram collector returning empty");
+      logger.warn("APIFY_API_TOKEN not set - Instagram collector returning empty");
       return {
         videos: [],
-        stats: { got: 0, wanted: opts.target, triedQueries: [] },
+        stats: {
+          got: 0,
+          wanted: opts.target,
+          triedQueries: [],
+          status: "partial",
+          targetResults: opts.target,
+          sourceKinds: { instagram: "organic" },
+          dropReasons: { missing_provider_token: 1 },
+        },
       };
     }
 
-    // 3A.3 — Paginate through queries until target is met
     for (const query of queries) {
       const tag = normalizeTag(query);
       if (!tag || triedTags.has(tag)) continue;
       triedTags.add(tag);
 
-      if (
-        videos.length >= opts.target ||
-        Date.now() - start >= opts.timeBudgetMs
-      ) {
-        break;
-      }
+      if (videos.length >= opts.target || Date.now() - start >= opts.timeBudgetMs) break;
 
       triedQueries.push(tag);
-      logger.info({ query, tag }, "Instagram: collecting reel for query");
+      logger.info({ query, tag }, "Instagram: collecting organic reel candidates");
 
       try {
-        const batch = await withRetry(
-          () => this.runApifyActor(tag, opts.target - videos.length),
-          { maxAttempts: 3, baseDelay: 2000 }
-        );
+        for (let depth = 0; depth < Math.max(1, env.MAX_REFILL_ROUNDS) && videos.length < opts.target; depth++) {
+          const { items, fromCache, liveRun, blockedReason } = await withRetry(
+            () => this.fetchNormalizedItems(tag, opts.target - videos.length, depth),
+            { maxAttempts: 3, baseDelay: 2000 }
+          );
+          if (fromCache) cacheHits++;
+          if (liveRun) liveRuns++;
+          if (blockedReason) {
+            incrementDrop(dropReasons, blockedReason);
+            return {
+              videos,
+              stats: {
+                got: videos.length,
+                wanted: opts.target,
+                triedQueries,
+                status: "partial",
+                targetResults: opts.target,
+                sourceKinds: { instagram: "organic" },
+                dropReasons,
+                cacheHits,
+                liveRuns,
+              },
+            };
+          }
 
-        for (const item of batch) {
-          // 3A.4 — In-flight dedup
-          const key = makeSeenKey("instagram", item.platformId);
-          if (localSeen.has(key)) continue;
-          localSeen.add(key);
-          videos.push(item);
+          let acceptedThisDepth = 0;
+          for (const item of items) {
+            const eligibility = evaluateOrganicReel(item);
+            if (!eligibility.item) {
+              incrementDrop(dropReasons, eligibility.dropReason);
+              continue;
+            }
+
+            const video = videoFromEligibleItem(eligibility.item, eligibility.paidMarkerDetected);
+            const key = makeSeenKey("instagram", video.platformId);
+            if (localSeen.has(key)) continue;
+            if (!underCreatorCap(eligibility.item, creatorCounts, env.PER_CREATOR_CAP)) {
+              incrementDrop(dropReasons, "creator_cap");
+              continue;
+            }
+            localSeen.add(key);
+            videos.push(video);
+            acceptedThisDepth++;
+            if (videos.length >= opts.target) break;
+          }
+
+          if (!fromCache && acceptedThisDepth < env.MIN_REFILL_YIELD) break;
         }
       } catch (err) {
         logger.error({ err, query }, "Instagram collector: query failed");
+        incrementDrop(dropReasons, err instanceof Error ? err.message : "provider_error");
       }
 
       if (videos.length < opts.target) {
-        await sleep(1000); // be polite between queries
+        await sleep(1000);
       }
     }
 
-    // 3A.5 — Always return stats
     return {
       videos,
       stats: {
         got: videos.length,
         wanted: opts.target,
         triedQueries,
+        status: videos.length >= opts.target ? "complete" : "partial",
+        targetResults: opts.target,
+        sourceKinds: { instagram: "organic" },
+        dropReasons,
+        cacheHits,
+        liveRuns,
       },
     };
   }
 
-  private async runApifyActor(
+  private async fetchNormalizedItems(
     hashtag: string,
-    maxItems: number
-  ): Promise<Video[]> {
-    // Normalize hashtag — strip # if present
+    maxItems: number,
+    paginationDepth: number
+  ): Promise<{ items: NormalizedProviderItem[]; fromCache: boolean; liveRun: boolean; blockedReason?: string }> {
     const tag = normalizeTag(hashtag);
-    if (!tag) return [];
+    if (!tag) return { items: [], fromCache: false, liveRun: false };
 
-    // Start actor run
+    const cacheKey = JSON.stringify({
+      provider: "apify:instagram",
+      tag,
+      paginationDepth,
+      maxItems: Math.min(maxItems, 50),
+      resultsType: "reels",
+    });
+    const cached = readProviderCache<ApifyRawItem[]>(cacheKey);
+    if (cached) {
+      return {
+        items: cached
+          .map((item) => normalizeApifyInstagramItem(item, paginationDepth))
+          .filter((item): item is NormalizedProviderItem => item !== null),
+        fromCache: true,
+        liveRun: false,
+      };
+    }
+
+    const consumed = tryConsumeProviderRun(this.budget);
+    if (!consumed.ok) {
+      return { items: [], fromCache: false, liveRun: false, blockedReason: consumed.reason };
+    }
+
     const runResp = await axios.post(
       `${APIFY_BASE_URL}/acts/${ACTOR_ID}/runs`,
       {
         directUrls: [`https://www.instagram.com/explore/tags/${tag}/`],
-        resultsType: "posts",
+        resultsType: "reels",
         resultsLimit: Math.min(maxItems, 50),
-        searchLimit: 1,
+        searchLimit: Math.max(1, paginationDepth + 1),
       },
       {
         headers: { Authorization: `Bearer ${env.APIFY_API_TOKEN}` },
@@ -227,17 +370,15 @@ export class InstagramCollector implements Collector {
     );
 
     const runId: string = runResp.data.data.id;
-    logger.info({ runId, tag }, "Apify Instagram actor started");
+    logger.info({ runId, tag, paginationDepth }, "Apify Instagram actor started");
 
-    // Poll until finished (max 90s)
     let status = "RUNNING";
     let attempts = 0;
     while (status === "RUNNING" && attempts < 30) {
       await sleep(3000);
-      const statusResp = await axios.get(
-        `${APIFY_BASE_URL}/actor-runs/${runId}`,
-        { headers: { Authorization: `Bearer ${env.APIFY_API_TOKEN}` } }
-      );
+      const statusResp = await axios.get(`${APIFY_BASE_URL}/actor-runs/${runId}`, {
+        headers: { Authorization: `Bearer ${env.APIFY_API_TOKEN}` },
+      });
       status = statusResp.data.data.status;
       attempts++;
     }
@@ -246,18 +387,19 @@ export class InstagramCollector implements Collector {
       throw new Error(`Apify actor run ${runId} finished with status: ${status}`);
     }
 
-    // Fetch results
-    const datasetResp = await axios.get(
-      `${APIFY_BASE_URL}/actor-runs/${runId}/dataset/items`,
-      {
-        headers: { Authorization: `Bearer ${env.APIFY_API_TOKEN}` },
-        params: { clean: true, limit: maxItems },
-      }
-    );
+    const datasetResp = await axios.get(`${APIFY_BASE_URL}/actor-runs/${runId}/dataset/items`, {
+      headers: { Authorization: `Bearer ${env.APIFY_API_TOKEN}` },
+      params: { clean: true, limit: maxItems },
+    });
 
     const items: ApifyRawItem[] = datasetResp.data;
-    return items
-      .map(normalizeApifyItem)
-      .filter((v): v is Video => v !== null);
+    writeProviderCache(cacheKey, items);
+    return {
+      items: items
+        .map((item) => normalizeApifyInstagramItem(item, paginationDepth))
+        .filter((item): item is NormalizedProviderItem => item !== null),
+      fromCache: false,
+      liveRun: true,
+    };
   }
 }

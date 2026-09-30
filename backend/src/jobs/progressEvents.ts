@@ -4,11 +4,50 @@ export type SearchProgressEvent =
   | { stage: "validate"; status: "done" }
   | { stage: "resolve"; status: "done"; product: { title: string; imageUrl: string; description?: string } }
   | { stage: "brain"; status: "done"; attributes: unknown }
-  | { stage: "collect"; status: "progress" | "done"; source?: string; got: number; wanted: number; shortfall?: number }
-  | { stage: "dedup"; status: "done"; before: number; after: number }
-  | { stage: "score"; status: "progress" | "done"; scored?: number; total?: number }
+  | {
+      contractVersion?: 1;
+      stage: "collect";
+      status: "progress" | "done";
+      resultStatus?: "complete" | "partial";
+      source?: string;
+      got: number;
+      wanted: number;
+      targetResults?: number;
+      sourceKinds?: Record<string, "organic" | "ads" | "unknown">;
+      dropReasons?: Record<string, number>;
+      shortfall?: number;
+    }
+  | {
+      contractVersion?: 1;
+      stage: "dedup";
+      status: "done";
+      before: number;
+      after: number;
+      resultStatus?: "complete" | "partial";
+      targetResults?: number;
+      sourceKinds?: Record<string, "organic" | "ads" | "unknown">;
+      dropReasons?: Record<string, number>;
+    }
+  | {
+      contractVersion?: 1;
+      stage: "score";
+      status: "progress" | "done";
+      scored?: number;
+      total?: number;
+      resultStatus?: "complete" | "partial";
+      targetResults?: number;
+    }
   | { stage: "persist"; status: "done" }
-  | { stage: "done"; results: unknown[]; productInfo: { title: string; imageUrl: string; description?: string; attributes?: unknown } }
+  | {
+      contractVersion?: 1;
+      stage: "done";
+      status?: "complete" | "partial";
+      targetResults?: number;
+      sourceKinds?: Record<string, "organic" | "ads" | "unknown">;
+      dropReasons?: Record<string, number>;
+      results: unknown[];
+      productInfo: { title: string; imageUrl: string; description?: string; attributes?: unknown };
+    }
   | { stage: "error"; error: { code: string; message: string; hint: string } };
 
 const emitter = new EventEmitter();
