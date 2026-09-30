@@ -67,7 +67,7 @@ The application requires specific environment variables to function correctly. C
 
 ## Startup Instructions
 
-### Method A: One-Click Docker (Recommended)
+### Method A: One-Click Docker 
 The simplest way to run the entire stack (Frontend, Backend, and Redis) locally is via Docker.
 
 1. Ensure Docker Desktop is installed and running.
