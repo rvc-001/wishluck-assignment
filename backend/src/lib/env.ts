@@ -23,6 +23,26 @@ function csv(key: string, fallback: string): string[] {
     .filter(Boolean);
 }
 
+function positiveInt(key: string, fallback: number): number {
+  const parsed = parseInt(optional(key, String(fallback)), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function optionalPositiveInt(key: string): number | undefined {
+  const raw = process.env[key];
+  if (!raw) return undefined;
+  const parsed = parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+const globalVideoViews = (() => {
+  const minVideo = optionalPositiveInt("MIN_VIDEO_VIEWS");
+  const legacy = optionalPositiveInt("MIN_REEL_VIEWS");
+  if (minVideo !== undefined) return minVideo;
+  if (legacy !== undefined) return legacy;
+  return 7500;
+})();
+
 export const env = {
   // Server
   PORT: parseInt(optional("PORT", "3001"), 10),
@@ -53,6 +73,10 @@ export const env = {
   SEARCH_SOURCES: csv("SEARCH_SOURCES", "instagram"),
   INSTAGRAM_PROVIDER: optional("INSTAGRAM_PROVIDER", "apify"),
   TARGET_RESULTS: parseInt(optional("TARGET_RESULTS", "20"), 10),
+  MIN_VIDEO_VIEWS: globalVideoViews,
+  MIN_REEL_VIEWS: globalVideoViews,
+  MIN_INSTAGRAM_VIEWS: optionalPositiveInt("MIN_INSTAGRAM_VIEWS") ?? globalVideoViews,
+  MIN_TIKTOK_VIEWS: optionalPositiveInt("MIN_TIKTOK_VIEWS") ?? globalVideoViews,
   MAX_REFILL_ROUNDS: parseInt(optional("MAX_REFILL_ROUNDS", "6"), 10),
   MIN_REFILL_YIELD: parseInt(optional("MIN_REFILL_YIELD", "1"), 10),
   MAX_APIFY_RUNS_PER_JOB: parseInt(optional("MAX_APIFY_RUNS_PER_JOB", "8"), 10),
@@ -63,6 +87,8 @@ export const env = {
 
   // Apify (for Instagram scraper)
   APIFY_API_TOKEN: optional("APIFY_API_TOKEN", ""),
+  TIKTOK_PROVIDER: optional("TIKTOK_PROVIDER", "apify"),
+  TIKTOK_ACTOR_ID: optional("TIKTOK_ACTOR_ID", ""),
 
   // Meta Ad Library API
   META_AD_LIBRARY_ACCESS_TOKEN: optional("META_AD_LIBRARY_ACCESS_TOKEN", ""),
@@ -85,9 +111,5 @@ export function validateStartupConfig(): void {
   const sources = new Set(env.SEARCH_SOURCES);
   if (sources.has("instagram") && env.INSTAGRAM_PROVIDER === "apify" && !env.APIFY_API_TOKEN) {
     throw new Error("APIFY_API_TOKEN is required when SEARCH_SOURCES includes instagram and INSTAGRAM_PROVIDER=apify");
-  }
-
-  if (sources.has("meta") && env.META_ENABLE_OFFICIAL && !env.META_AD_LIBRARY_ACCESS_TOKEN) {
-    throw new Error("META_AD_LIBRARY_ACCESS_TOKEN is required when meta source uses the official API");
   }
 }

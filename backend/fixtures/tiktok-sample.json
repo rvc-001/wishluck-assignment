@@ -1,0 +1,31 @@
+[
+  {
+    "id": "9007199254740993123",
+    "webVideoUrl": "https://www.tiktok.com/@cleanhome/video/9007199254740993123",
+    "cover": "https://picsum.photos/seed/tiktok-clean-1/400/700",
+    "desc": "Ceiling fan duster cleaning hack #cleaningtok #duster",
+    "authorMeta": { "name": "cleanhome" },
+    "playCount": "42.5K",
+    "diggCount": "1200",
+    "createTimeISO": "2026-09-01T12:00:00.000Z"
+  },
+  {
+    "id": "9007199254740993124",
+    "webVideoUrl": "https://www.tiktok.com/@homefinds/video/9007199254740993124",
+    "cover": "https://picsum.photos/seed/tiktok-clean-2/400/700",
+    "desc": "Microfiber duster for high corners #homefinds",
+    "authorMeta": { "name": "homefinds" },
+    "playCount": 6900,
+    "diggCount": 88,
+    "createTimeISO": "2026-09-02T12:00:00.000Z"
+  },
+  {
+    "id": "9007199254740993125",
+    "webVideoUrl": "https://www.tiktok.com/@unknown/video/9007199254740993125",
+    "cover": "https://picsum.photos/seed/tiktok-clean-3/400/700",
+    "desc": "Cleaning tool demo",
+    "authorMeta": { "name": "unknown" },
+    "playCount": null,
+    "diggCount": -1
+  }
+]

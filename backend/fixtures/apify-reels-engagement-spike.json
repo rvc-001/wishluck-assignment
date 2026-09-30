@@ -1,0 +1,34 @@
+{
+  "capturedAt": "2026-09-30T00:00:00.000Z",
+  "provider": "apify:instagram",
+  "actor": "apify~instagram-scraper",
+  "actorVersion": "fixture-from-existing-sample",
+  "canonicalViewField": "views",
+  "usableViewCoverage": 1,
+  "usableLikeCoverage": 1,
+  "aboveFloorShareAt7500": 1,
+  "notes": [
+    "Fixture records mirror the existing sample data shape because live Apify access was not available during implementation.",
+    "Runtime code still measures usable view coverage per eligible Reel batch and disables engagement ordering when coverage is low."
+  ],
+  "rows": [
+    {
+      "url": "https://www.instagram.com/reel/example1/",
+      "platformId": "example1",
+      "views": 45000,
+      "likes": 1243
+    },
+    {
+      "url": "https://www.instagram.com/reel/example2/",
+      "platformId": "example2",
+      "views": "32K",
+      "likes": "890"
+    },
+    {
+      "url": "https://www.instagram.com/reel/hidden/",
+      "platformId": "hidden",
+      "views": null,
+      "likes": -1
+    }
+  ]
+}

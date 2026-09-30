@@ -15,6 +15,7 @@ export type SearchProgressEvent =
       targetResults?: number;
       sourceKinds?: Record<string, "organic" | "ads" | "unknown">;
       dropReasons?: Record<string, number>;
+      sourceWarnings?: Record<string, string[]>;
       shortfall?: number;
     }
   | {
@@ -46,7 +47,13 @@ export type SearchProgressEvent =
       sourceKinds?: Record<string, "organic" | "ads" | "unknown">;
       dropReasons?: Record<string, number>;
       results: unknown[];
-      productInfo: { title: string; imageUrl: string; description?: string; attributes?: unknown };
+      engagementOrdering?: "enabled" | "disabled_low_coverage";
+      engagementSummary?: { aboveFloor: number; shown: number; floor: number };
+      engagementOrderingByPlatform?: Record<string, "enabled" | "disabled_low_coverage">;
+      engagementSummaryByPlatform?: Record<string, { aboveFloor: number; shown: number; floor: number }>;
+      sourceWarnings?: Record<string, string[]>;
+      qualityNotice?: { title: string; messages: string[] };
+      productInfo: { title: string; imageUrl: string; description?: string; attributes?: unknown; diagnostics?: unknown };
     }
   | { stage: "error"; error: { code: string; message: string; hint: string } };
 

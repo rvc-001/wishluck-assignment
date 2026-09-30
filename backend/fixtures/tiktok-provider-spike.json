@@ -1,0 +1,19 @@
+{
+  "status": "inconclusive",
+  "capturedAt": "2026-09-30T00:00:00.000Z",
+  "provider": "apify:tiktok",
+  "actor": "unvalidated",
+  "actorVersion": "unvalidated",
+  "minimumQueriesRequired": 5,
+  "minimumEligibleRowsRequired": 100,
+  "usableViewCoverageGate": 0.6,
+  "thumbnailFetchSuccessGate": 0.8,
+  "thumbnailRecheckAfterHours": 24,
+  "aboveFloorShareGate": 0.2,
+  "medianViewSkewGate": 5,
+  "notes": [
+    "Replace this file with raw metadata from a real Apify TikTok run before enabling TikTok by default.",
+    "The implementation remains opt-in and disables TikTok when TIKTOK_ACTOR_ID or APIFY_API_TOKEN is missing."
+  ],
+  "rawOutputFixture": "tiktok-sample.json"
+}

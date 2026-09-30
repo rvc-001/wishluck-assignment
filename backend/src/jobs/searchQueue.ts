@@ -7,6 +7,14 @@ import { emitSearchEvent } from "./progressEvents";
 import { CollectorResult, Video } from "../collectors/types";
 import { filterPreviouslySeen } from "../dedup/crossSearch";
 import { normalizeUrl, sha256 } from "../lib/utils";
+import {
+  aboveFloorCount,
+  engagementOrderingByPlatformFor,
+  engagementOrderingFor,
+  engagementStatus,
+  floorForPlatform,
+  rankOrganicVideos,
+} from "../engagement/reels";
 
 export const SEARCH_QUEUE_NAME = "search-jobs";
 
@@ -107,6 +115,21 @@ function platformCount(videos: Video[], platform: Video["platform"]): number {
   return videos.filter((video) => video.platform === platform).length;
 }
 
+export type SourceWarnings = Record<string, string[]>;
+
+function addSourceWarning(warnings: SourceWarnings, source: string, message: string): void {
+  const existing = warnings[source] ?? [];
+  if (existing.includes(message)) return;
+  warnings[source] = [...existing, message];
+}
+
+function eligibleOrganicVideo(video: Video): boolean {
+  if (video.sourceKind !== "organic") return false;
+  if (video.platform === "instagram") return video.contentType === "reel";
+  if (video.platform === "tiktok") return video.contentType === "video";
+  return false;
+}
+
 function nextQueryBatch(baseQueries: string[], attempt: number): string[] {
   if (attempt === 0) return baseQueries;
   void attempt;
@@ -131,6 +154,72 @@ export interface CollectionPipelineResult {
   targetResults: number;
   sourceKinds: Record<string, "organic" | "ads" | "unknown">;
   dropReasons: Record<string, number>;
+  sourceWarnings?: SourceWarnings;
+}
+
+export interface SourcePlan {
+  sources: SourceCollectorConfig[];
+  sourceWarnings: SourceWarnings;
+  requestedSources: string[];
+}
+
+export async function buildSourceConfigsForSearch(params: {
+  requestedSources: string[];
+  instagramQueries: string[];
+  tiktokQueries?: string[];
+  metaQueries: string[];
+  target: number;
+}): Promise<SourcePlan> {
+  const sourceWarnings: SourceWarnings = {};
+  const requested = Array.from(new Set(params.requestedSources.map((source) => source.trim().toLowerCase()).filter(Boolean)));
+  const unsupported = requested.filter((source) => !["instagram", "tiktok"].includes(source));
+  for (const source of unsupported) {
+    addSourceWarning(sourceWarnings, source, "Unsupported source ignored for organic video search.");
+    logger.warn({ source, requestedSources: requested }, "Unsupported search source ignored");
+  }
+
+  const sources: SourceCollectorConfig[] = [];
+  if (requested.includes("instagram")) {
+    const { InstagramCollector } = await import("../collectors/instagram");
+    sources.push({
+      id: "instagram",
+      label: "Instagram Reels",
+      kind: "organic",
+      collector: new InstagramCollector(),
+      queries: params.instagramQueries,
+      target: params.target,
+    });
+  }
+
+  if (requested.includes("tiktok")) {
+    if (!env.ENABLE_TIKTOK) {
+      addSourceWarning(sourceWarnings, "tiktok", "TikTok is disabled. Set ENABLE_TIKTOK=true and include tiktok in SEARCH_SOURCES to show TikTok videos.");
+      logger.warn({ requestedSources: requested }, "TikTok requested but ENABLE_TIKTOK is false");
+    } else if (!env.APIFY_API_TOKEN || !env.TIKTOK_ACTOR_ID) {
+      addSourceWarning(sourceWarnings, "tiktok", "TikTok disabled: APIFY_API_TOKEN or TIKTOK_ACTOR_ID is missing.");
+      logger.warn(
+        { hasApifyToken: Boolean(env.APIFY_API_TOKEN), hasTikTokActorId: Boolean(env.TIKTOK_ACTOR_ID) },
+        "TikTok requested but provider configuration is missing"
+      );
+    } else {
+      const { TikTokCollector } = await import("../collectors/tiktok");
+      sources.push({
+        id: "tiktok",
+        label: "TikTok Videos",
+        kind: "organic",
+        collector: new TikTokCollector(),
+        queries: params.tiktokQueries ?? params.instagramQueries,
+        target: params.target,
+      });
+      logger.info({ actorId: env.TIKTOK_ACTOR_ID, target: params.target }, "TikTok source enabled for search");
+    }
+  }
+
+  void params.metaQueries;
+  if (!requested.includes("tiktok") && env.ENABLE_TIKTOK) {
+    addSourceWarning(sourceWarnings, "tiktok", "TikTok is enabled but not requested. Add tiktok to SEARCH_SOURCES to include TikTok videos.");
+  }
+  return { sources, sourceWarnings, requestedSources: requested };
 }
 
 function mergeReasons(target: Record<string, number>, source?: Record<string, number>): void {
@@ -139,12 +228,108 @@ function mergeReasons(target: Record<string, number>, source?: Record<string, nu
   }
 }
 
+function sourceWarningForDropReason(reason: string): string | undefined {
+  switch (reason) {
+    case "apify_monthly_usage_hard_limit":
+      return "Apify monthly usage hard limit is exceeded, so this source cannot run. Raise the Apify usage limit/add billing credits, or switch to fixture mode while developing.";
+    case "apify_provider_auth":
+      return "Apify rejected the token or actor access for this source. Check APIFY_API_TOKEN and the actor permissions.";
+    case "tiktok_paid_actor_insufficient_usage":
+      return "TikTok could not run because the Apify account does not have enough remaining usage for this paid actor. Add Apify credits, raise the billing limit, choose a cheaper/free actor, or remove tiktok from SEARCH_SOURCES.";
+    case "tiktok_provider_auth":
+      return "TikTok could not run because Apify rejected the token or actor access. Check APIFY_API_TOKEN and TIKTOK_ACTOR_ID.";
+    case "missing_tiktok_provider_config":
+      return "TikTok disabled: APIFY_API_TOKEN or TIKTOK_ACTOR_ID is missing.";
+    case "per_job_run_cap":
+      return "Provider run budget reached for this search; showing the best results collected so far.";
+    case "daily_run_budget":
+      return "Daily provider run budget reached; showing cached or already collected results only.";
+    case "provider_error":
+      return "Provider error while collecting this source; showing results from sources that completed.";
+    default:
+      return undefined;
+  }
+}
+
+function addDropReasonWarnings(warnings: SourceWarnings, source: string, dropReasons?: Record<string, number>): void {
+  for (const [reason, count] of Object.entries(dropReasons ?? {})) {
+    if (count <= 0) continue;
+    const message = sourceWarningForDropReason(reason);
+    if (message) addSourceWarning(warnings, source, message);
+  }
+}
+
+function hasActionableDropReason(dropReasons?: Record<string, number>): boolean {
+  return Object.keys(dropReasons ?? {}).some((reason) => sourceWarningForDropReason(reason));
+}
+
 function totalTarget(sources: SourceCollectorConfig[]): number {
   return sources.reduce((sum, source) => sum + source.target, 0);
 }
 
 function sourceKindsFor(sources: SourceCollectorConfig[]): Record<string, "organic" | "ads" | "unknown"> {
   return Object.fromEntries(sources.map((source) => [source.id, source.kind]));
+}
+
+function platformFloors(): Record<string, number> {
+  return {
+    instagram: env.MIN_INSTAGRAM_VIEWS,
+    tiktok: env.MIN_TIKTOK_VIEWS,
+  };
+}
+
+function engagementSummaryByPlatform(
+  rows: Array<{ platform: string; views?: number | null }>,
+  floors = platformFloors()
+): Record<string, { aboveFloor: number; shown: number; floor: number }> {
+  const byPlatform = new Map<string, Array<{ views?: number | null }>>();
+  for (const row of rows) {
+    const list = byPlatform.get(row.platform) ?? [];
+    list.push(row);
+    byPlatform.set(row.platform, list);
+  }
+  return Object.fromEntries(
+    [...byPlatform.entries()].map(([platform, items]) => {
+      const floor = floorForPlatform(platform, floors, env.MIN_VIDEO_VIEWS);
+      return [platform, { aboveFloor: aboveFloorCount(items, floor), shown: items.length, floor }];
+    })
+  );
+}
+
+function legacyEngagementOrdering(orderingByPlatform: Record<string, "enabled" | "disabled_low_coverage">): "enabled" | "disabled_low_coverage" {
+  const values = Object.values(orderingByPlatform);
+  return values.length > 0 && values.every((value) => value === "enabled") ? "enabled" : "disabled_low_coverage";
+}
+
+function qualityNoticeFor(params: {
+  results: Array<{ label?: string; score?: number; engagementStatus?: string; reason?: string }>;
+  targetResults: number;
+  sourceWarnings?: SourceWarnings;
+}): { title: string; messages: string[] } | undefined {
+  const messages: string[] = [];
+  const matchCount = params.results.filter((result) => result.label === "match" && (result.score ?? 0) >= 0.6).length;
+  const highEngagementCount = params.results.filter((result) => result.engagementStatus === "high").length;
+  const fallbackCount = params.results.filter((result) => /fallback|text relevance|visual verification unavailable|inconclusive/i.test(result.reason ?? "")).length;
+
+  if (params.results.length === 0) {
+    messages.push("No eligible organic videos were found for this search.");
+  } else {
+    if (matchCount < Math.max(3, Math.ceil(params.targetResults * 0.25))) {
+      messages.push("Very few visually relevant videos were found. Results may be based on broad caption or hashtag matches.");
+    }
+    if (highEngagementCount < Math.max(3, Math.ceil(params.results.length * 0.25))) {
+      messages.push("Few returned videos clear the high-engagement view threshold.");
+    }
+    if (fallbackCount > Math.ceil(params.results.length * 0.5)) {
+      messages.push("Visual verification was unavailable or inconclusive for many videos, so ranking relied more on text signals.");
+    }
+  }
+
+  for (const [source, warnings] of Object.entries(params.sourceWarnings ?? {})) {
+    for (const warning of warnings) messages.push(`${source}: ${warning}`);
+  }
+
+  return messages.length > 0 ? { title: "Why results may look weak", messages } : undefined;
 }
 
 function hasProviderBudgetStop(dropReasons: Record<string, number>): boolean {
@@ -156,11 +341,13 @@ export async function collectWithRefill(params: {
   seenIds: Set<string>;
   searchId: string;
   timeBudgetMs: number;
+  sourceWarnings?: SourceWarnings;
 }): Promise<CollectionPipelineResult> {
   const started = Date.now();
   const rawVideos: Video[] = [];
   const attemptedQueries = new Map<string, Set<string>>();
   const dropReasons: Record<string, number> = {};
+  const sourceWarnings: SourceWarnings = { ...(params.sourceWarnings ?? {}) };
   let attempts = 0;
 
   while (attempts < env.MAX_REFILL_ROUNDS && Date.now() - started < params.timeBudgetMs) {
@@ -187,11 +374,16 @@ export async function collectWithRefill(params: {
 
     const results = await Promise.allSettled(
       runnable.map((task) =>
-        task.source.collector.collect(task.queries, {
-          target: task.missing,
-          seenIds: params.seenIds,
-          timeBudgetMs: timeLeft,
-        })
+        Promise.race([
+          task.source.collector.collect(task.queries, {
+            target: task.missing,
+            seenIds: params.seenIds,
+            timeBudgetMs: timeLeft,
+          }),
+          new Promise<CollectorResult>((_, reject) =>
+            setTimeout(() => reject(new Error("source_timeout")), Math.min(timeLeft, env.REQUEST_TIMEOUT_MS * 6))
+          ),
+        ])
       )
     );
 
@@ -200,10 +392,15 @@ export async function collectWithRefill(params: {
       const result = results[i];
       if (result.status !== "fulfilled") {
         mergeReasons(dropReasons, { provider_error: 1 });
+        addSourceWarning(sourceWarnings, task.source.id, result.reason instanceof Error ? result.reason.message : "Provider error.");
         continue;
       }
 
       mergeReasons(dropReasons, result.value.stats.dropReasons);
+      addDropReasonWarnings(sourceWarnings, task.source.id, result.value.stats.dropReasons);
+      if (result.value.videos.length === 0 && !hasActionableDropReason(result.value.stats.dropReasons)) {
+        addSourceWarning(sourceWarnings, task.source.id, "No eligible organic videos returned.");
+      }
       const videos = filterPreviouslySeen(result.value.videos, params.seenIds);
       rawVideos.push(...videos);
       appendSeenIds(params.seenIds, videos);
@@ -236,6 +433,7 @@ export async function collectWithRefill(params: {
     targetResults,
     sourceKinds: sourceKindsFor(params.sources),
     dropReasons,
+    sourceWarnings,
     shortfall: Math.max(0, targetResults - rawVideos.length),
   });
 
@@ -245,6 +443,7 @@ export async function collectWithRefill(params: {
     targetResults,
     sourceKinds: sourceKindsFor(params.sources),
     dropReasons,
+    sourceWarnings,
   };
 }
 
@@ -256,11 +455,13 @@ export async function dedupWithSourceRefill(params: {
   timeBudgetMs: number;
   runDedup: (videos: Video[]) => Promise<Video[]>;
   dropReasons?: Record<string, number>;
+  sourceWarnings?: SourceWarnings;
 }): Promise<CollectionPipelineResult> {
   const started = Date.now();
   let rawVideos = params.rawVideos;
   let dedupedVideos = await params.runDedup(rawVideos);
   const dropReasons = { ...(params.dropReasons ?? {}) };
+  const sourceWarnings: SourceWarnings = { ...(params.sourceWarnings ?? {}) };
   let attempts = 0;
 
   while (attempts < env.MAX_REFILL_ROUNDS && Date.now() - started < params.timeBudgetMs) {
@@ -302,9 +503,11 @@ export async function dedupWithSourceRefill(params: {
       const result = results[i];
       if (result.status !== "fulfilled") {
         mergeReasons(dropReasons, { provider_error: 1 });
+        addSourceWarning(sourceWarnings, runnable[i].source.id, result.reason instanceof Error ? result.reason.message : "Provider error.");
         continue;
       }
       mergeReasons(dropReasons, result.value.stats.dropReasons);
+      addDropReasonWarnings(sourceWarnings, runnable[i].source.id, result.value.stats.dropReasons);
       refill.push(...filterPreviouslySeen(result.value.videos, params.seenIds));
     }
     appendSeenIds(params.seenIds, refill);
@@ -324,6 +527,7 @@ export async function dedupWithSourceRefill(params: {
     targetResults,
     sourceKinds: sourceKindsFor(params.sources),
     dropReasons,
+    sourceWarnings,
   };
 }
 
@@ -395,7 +599,18 @@ export async function processSearchJob(
         const brainData =
           treatAsKeyword
             ? await analyzeKeyword(effectiveQuery)
-            : await analyzeImage(product.imageUrl, product.title);
+            : await analyzeImage(product.imageUrl, product.title, product.description);
+        logger.info(
+          {
+            searchId,
+            productTitle: product.title,
+            productDescription: product.description,
+            productType: brainData.attributes.productType,
+            searchQueries: brainData.attributes.searchQueries,
+            matchCriteria: brainData.attributes.matchCriteria,
+          },
+          "Product analysis complete"
+        );
         emitSearchEvent(searchId, {
           stage: "brain",
           status: "done",
@@ -404,40 +619,23 @@ export async function processSearchJob(
         await updateProgress(40);
 
         // --- PHASE 3: VIDEO COLLECTORS ---
-        const { InstagramCollector } = await import("../collectors/instagram");
-        const { MetaCollector } = await import("../collectors/meta");
-
         const instagramQueries =
           treatAsKeyword
             ? buildInstagramHashtagQueries([effectiveQuery, ...brainData.attributes.searchQueries], env.KEYWORD_INSTAGRAM_QUERIES)
-            : buildInstagramHashtagQueries(brainData.attributes.searchQueries, env.KEYWORD_INSTAGRAM_QUERIES);
+            : buildInstagramHashtagQueries([product.title, product.description, ...brainData.attributes.searchQueries], env.KEYWORD_INSTAGRAM_QUERIES);
         const metaQueries =
           treatAsKeyword
             ? [effectiveQuery]
             : uniqueQueries([product.title, ...brainData.attributes.adKeywords]).slice(0, 2);
 
-        const activeSources = new Set(env.SEARCH_SOURCES);
-        const sources: SourceCollectorConfig[] = [];
-        if (activeSources.has("instagram")) {
-          sources.push({
-            id: "instagram",
-            label: "Instagram Reels",
-            kind: "organic",
-            collector: new InstagramCollector(),
-            queries: instagramQueries,
-            target: env.TARGET_RESULTS,
-          });
-        }
-        if (activeSources.has("meta")) {
-          sources.push({
-            id: "meta",
-            label: "Meta Ad Library",
-            kind: "ads",
-            collector: new MetaCollector(),
-            queries: metaQueries,
-            target: env.TARGET_RESULTS,
-          });
-        }
+        const sourcePlan = await buildSourceConfigsForSearch({
+          requestedSources: env.SEARCH_SOURCES,
+          instagramQueries,
+          tiktokQueries: instagramQueries,
+          metaQueries,
+          target: env.TARGET_RESULTS,
+        });
+        const { sources } = sourcePlan;
         if (sources.length === 0) {
           throw new Error("SEARCH_SOURCES did not enable any supported collectors.");
         }
@@ -446,6 +644,16 @@ export async function processSearchJob(
           { sources: sources.map((source) => source.id), instagramQueries, metaQueries, target: env.TARGET_RESULTS },
           "Collector query plan"
         );
+        const attributesForStorage = {
+          ...brainData.attributes,
+          queryPlan: {
+            instagramQueries,
+            tiktokQueries: instagramQueries,
+            metaQueries,
+            sources: sources.map((source) => source.id),
+            sourceWarnings: sourcePlan.sourceWarnings,
+          },
+        };
 
         const seenIds = showSeen ? new Set<string>() : await getPreviouslySeenIds();
 
@@ -454,8 +662,9 @@ export async function processSearchJob(
           seenIds,
           searchId,
           timeBudgetMs: 60000,
+          sourceWarnings: sourcePlan.sourceWarnings,
         });
-        let rawVideos = collectionResult.videos;
+        let rawVideos = collectionResult.videos.filter(eligibleOrganicVideo);
 
         await updateProgress(60);
 
@@ -469,8 +678,24 @@ export async function processSearchJob(
           timeBudgetMs: 60000,
           runDedup: runDedupPipeline,
           dropReasons: collectionResult.dropReasons,
+          sourceWarnings: collectionResult.sourceWarnings,
         });
-        const dedupedVideos = dedupResult.videos;
+        const dedupedVideos = dedupResult.videos.filter(eligibleOrganicVideo);
+        const engagementOrderingByPlatform = engagementOrderingByPlatformFor(dedupedVideos);
+        const engagementOrdering = legacyEngagementOrdering(engagementOrderingByPlatform);
+        for (const [platform, ordering] of Object.entries(engagementOrderingByPlatform)) {
+          const platformRows = dedupedVideos.filter((video) => video.platform === platform);
+          if (ordering === "disabled_low_coverage" && platformRows.length > 0) {
+            logger.warn(
+              {
+                searchId,
+                platform,
+                usableViewCoverage: platformRows.filter((video) => video.views !== undefined && video.views !== null).length / platformRows.length,
+              },
+              "Engagement ordering disabled for source due to low usable view coverage"
+            );
+          }
+        }
         emitSearchEvent(searchId, {
           contractVersion: 1,
           stage: "dedup",
@@ -498,11 +723,30 @@ export async function processSearchJob(
           })),
           env.VLM_TOP_N
         );
+        const floors = platformFloors();
+        const rankedResults = rankOrganicVideos(
+          scoredResults.flatMap((scored) => {
+            const video = dedupedVideos.find((candidate) => candidate.platformId === scored.id);
+            if (!video) return [];
+            return [{
+              scored,
+              video,
+              platform: video.platform,
+              score: scored.score.finalScore,
+              label: scored.score.label,
+              views: video.views,
+              likes: video.likes,
+            }];
+          }),
+          floors,
+          env.MIN_VIDEO_VIEWS,
+          engagementOrderingByPlatform
+        ).slice(0, env.TARGET_RESULTS * Math.max(1, sources.length));
         emitSearchEvent(searchId, {
           contractVersion: 1,
           stage: "score",
           status: "done",
-          scored: scoredResults.length,
+          scored: rankedResults.length,
           total: dedupedVideos.length,
           resultStatus: dedupResult.status,
           targetResults: dedupResult.targetResults,
@@ -518,14 +762,22 @@ export async function processSearchJob(
           data: {
             productTitle: product.title,
             imageUrl: product.imageUrl,
-            attributesJson: JSON.stringify(brainData.attributes),
+            attributesJson: JSON.stringify(attributesForStorage),
           }
         });
 
         // 2. Save Videos and SearchResults
-        for (const scored of scoredResults) {
-          const video = dedupedVideos.find(v => v.platformId === scored.id);
-          if (!video) continue;
+        for (const ranked of rankedResults) {
+          const { scored, video } = ranked;
+
+          const engagementUpdate =
+            video.views !== undefined || video.likes !== undefined
+              ? {
+                  ...(video.views !== undefined ? { views: video.views } : {}),
+                  ...(video.likes !== undefined ? { likes: video.likes } : {}),
+                  engagementFetchedAt: new Date(video.engagementFetchedAt ?? Date.now()),
+                }
+              : {};
 
           // Upsert Video
           const dbVideo = await (prisma as any).video.upsert({
@@ -546,6 +798,7 @@ export async function processSearchJob(
               isPaidPartnership: video.isPaidPartnership ?? false,
               paidMarkerDetected: video.paidMarkerDetected,
               dropReason: video.dropReason,
+              ...engagementUpdate,
             },
             create: {
               platform: video.platform,
@@ -566,6 +819,9 @@ export async function processSearchJob(
               isPaidPartnership: video.isPaidPartnership ?? false,
               paidMarkerDetected: video.paidMarkerDetected,
               dropReason: video.dropReason,
+              views: video.views,
+              likes: video.likes,
+              engagementFetchedAt: video.engagementFetchedAt ? new Date(video.engagementFetchedAt) : undefined,
             }
           });
 
@@ -599,9 +855,7 @@ export async function processSearchJob(
         });
         emitSearchEvent(searchId, { stage: "persist", status: "done" });
 
-        const responseResults = scoredResults.flatMap((scored) => {
-          const video = dedupedVideos.find((candidate) => candidate.platformId === scored.id);
-          if (!video) return [];
+        const responseResults = rankedResults.map(({ scored, video }) => {
           return [{
             id: video.platformId,
             videoId: video.platformId,
@@ -619,7 +873,18 @@ export async function processSearchJob(
             isPaidPartnership: video.isPaidPartnership ?? false,
             paidMarkerDetected: video.paidMarkerDetected,
             dropReason: video.dropReason,
+            views: video.views,
+            likes: video.likes,
+            engagementFetchedAt: video.engagementFetchedAt,
+            engagementStatus: engagementStatus(video.views, floorForPlatform(video.platform, floors, env.MIN_VIDEO_VIEWS)),
+            engagementOrdering,
           }];
+        }).flat();
+        const sourceWarnings = dedupResult.sourceWarnings ?? {};
+        const qualityNotice = qualityNoticeFor({
+          results: responseResults,
+          targetResults: env.TARGET_RESULTS,
+          sourceWarnings,
         });
         emitSearchEvent(searchId, {
           contractVersion: 1,
@@ -629,17 +894,28 @@ export async function processSearchJob(
           sourceKinds: dedupResult.sourceKinds,
           dropReasons: dedupResult.dropReasons,
           results: responseResults,
+          engagementOrdering,
+          engagementOrderingByPlatform,
+          engagementSummary: {
+            aboveFloor: aboveFloorCount(responseResults, env.MIN_VIDEO_VIEWS),
+            shown: responseResults.length,
+            floor: env.MIN_VIDEO_VIEWS,
+          },
+          engagementSummaryByPlatform: engagementSummaryByPlatform(responseResults, floors),
+          sourceWarnings,
+          qualityNotice,
           productInfo: {
             title: product.title,
             imageUrl: product.imageUrl,
             description: product.description,
             attributes: brainData.attributes,
+            diagnostics: attributesForStorage.queryPlan,
           },
         });
 
         await updateProgress(100);
-        logger.info({ searchId, videosCount: scoredResults.length }, "Job completed successfully");
-        return { searchId, status: "done", count: scoredResults.length };
+        logger.info({ searchId, videosCount: rankedResults.length }, "Job completed successfully");
+        return { searchId, status: "done", count: rankedResults.length };
       } catch (err) {
         logger.error({ err, searchId }, "Job failed in pipeline");
         emitSearchEvent(searchId, {

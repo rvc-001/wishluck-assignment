@@ -16,6 +16,7 @@ import {
   incrementDrop,
   underCreatorCap,
 } from "./organicEligibility";
+import { firstUsableCount, CANONICAL_VIEW_FIELDS, LIKE_FIELDS } from "../engagement/reels";
 import {
   ProviderRunBudget,
   createProviderRunBudget,
@@ -29,6 +30,8 @@ import { withRetry, sleep } from "../lib/utils";
 
 const APIFY_BASE_URL = "https://api.apify.com/v2";
 const ACTOR_ID = "apify~instagram-scraper";
+const APIFY_USAGE_LIMIT_REASON = "apify_monthly_usage_hard_limit";
+const APIFY_PROVIDER_AUTH_REASON = "apify_provider_auth";
 
 export interface ApifyRawItem {
   error?: string;
@@ -55,16 +58,45 @@ export interface ApifyRawItem {
   sponsorship?: unknown;
   caption?: string | { text?: string };
   hashtags?: string[];
-  likesCount?: number;
-  likes?: number;
-  videoViewCount?: number;
-  views?: number;
+  likesCount?: unknown;
+  likes?: unknown;
+  videoViewCount?: unknown;
+  videoPlayCount?: unknown;
+  playCount?: unknown;
+  views?: unknown;
   ownerUsername?: string;
   author?: string;
   ownerId?: string;
   owner?: { username?: string; id?: string };
   timestamp?: string;
   takenAtIso?: string;
+}
+
+function apifyBlockedReason(err: unknown): string | undefined {
+  if (!axios.isAxiosError(err)) return undefined;
+  const status = err.response?.status;
+  const type = (err.response?.data as { error?: { type?: string } } | undefined)?.error?.type;
+  if (type === "platform-feature-disabled") return APIFY_USAGE_LIMIT_REASON;
+  if (status === 402 || type === "not-enough-usage-to-run-paid-actor") return APIFY_USAGE_LIMIT_REASON;
+  if (status === 401 || status === 403) return APIFY_PROVIDER_AUTH_REASON;
+  return undefined;
+}
+
+function sanitizedProviderError(err: unknown): Record<string, unknown> {
+  if (!axios.isAxiosError(err)) {
+    return {
+      message: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  const data = err.response?.data as { error?: { type?: string; message?: string } } | undefined;
+  return {
+    message: data?.error?.message ?? err.message,
+    status: err.response?.status,
+    type: data?.error?.type,
+    url: err.config?.url,
+    method: err.config?.method,
+  };
 }
 
 function normalizeTag(query: string): string {
@@ -108,8 +140,8 @@ export function normalizeApifyInstagramItem(raw: ApifyRawItem, paginationDepth =
     contentType: inferContentType(raw, url),
     productType: raw.productType ?? raw.product_type,
     paidPartnershipFlag: Boolean(raw.isPaidPartnership || raw.paidPartnership || raw.sponsorship),
-    likes: raw.likesCount ?? raw.likes,
-    views: raw.videoViewCount ?? raw.views,
+    likes: firstUsableCount(raw as Record<string, unknown>, LIKE_FIELDS),
+    views: firstUsableCount(raw as Record<string, unknown>, CANONICAL_VIEW_FIELDS),
     createdAt: raw.timestamp ?? raw.takenAtIso,
     paginationDepth,
   };
@@ -144,6 +176,7 @@ function videoFromEligibleItem(item: NormalizedProviderItem, paidMarkerDetected?
     isPaidPartnership: false,
     paidMarkerDetected,
     createdAt: item.createdAt,
+    engagementFetchedAt: item.views !== undefined || item.likes !== undefined ? new Date().toISOString() : undefined,
   };
 }
 
@@ -299,8 +332,15 @@ export class InstagramCollector implements Collector {
           if (!fromCache && acceptedThisDepth < env.MIN_REFILL_YIELD) break;
         }
       } catch (err) {
-        logger.error({ err, query }, "Instagram collector: query failed");
-        incrementDrop(dropReasons, err instanceof Error ? err.message : "provider_error");
+        const blockedReason = apifyBlockedReason(err);
+        if (blockedReason) {
+          logger.warn({ err: sanitizedProviderError(err), query, blockedReason }, "Instagram collector: provider blocked run");
+          incrementDrop(dropReasons, blockedReason);
+          break;
+        }
+
+        logger.error({ err: sanitizedProviderError(err), query }, "Instagram collector: query failed");
+        incrementDrop(dropReasons, "provider_error");
       }
 
       if (videos.length < opts.target) {
@@ -355,19 +395,29 @@ export class InstagramCollector implements Collector {
       return { items: [], fromCache: false, liveRun: false, blockedReason: consumed.reason };
     }
 
-    const runResp = await axios.post(
-      `${APIFY_BASE_URL}/acts/${ACTOR_ID}/runs`,
-      {
-        directUrls: [`https://www.instagram.com/explore/tags/${tag}/`],
-        resultsType: "reels",
-        resultsLimit: Math.min(maxItems, 50),
-        searchLimit: Math.max(1, paginationDepth + 1),
-      },
-      {
-        headers: { Authorization: `Bearer ${env.APIFY_API_TOKEN}` },
-        timeout: 30000,
+    let runResp;
+    try {
+      runResp = await axios.post(
+        `${APIFY_BASE_URL}/acts/${ACTOR_ID}/runs`,
+        {
+          directUrls: [`https://www.instagram.com/explore/tags/${tag}/`],
+          resultsType: "reels",
+          resultsLimit: Math.min(maxItems, 50),
+          searchLimit: Math.max(1, paginationDepth + 1),
+        },
+        {
+          headers: { Authorization: `Bearer ${env.APIFY_API_TOKEN}` },
+          timeout: 30000,
+        }
+      );
+    } catch (err) {
+      const blockedReason = apifyBlockedReason(err);
+      if (blockedReason) {
+        logger.warn({ err: sanitizedProviderError(err), tag, blockedReason }, "Instagram collector: actor run could not start");
+        return { items: [], fromCache: false, liveRun: false, blockedReason };
       }
-    );
+      throw err;
+    }
 
     const runId: string = runResp.data.data.id;
     logger.info({ runId, tag, paginationDepth }, "Apify Instagram actor started");

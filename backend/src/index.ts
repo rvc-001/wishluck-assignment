@@ -14,6 +14,7 @@ import { logger } from "./lib/logger";
 import { getRedis } from "./lib/redis";
 import { startSearchWorker } from "./jobs/searchQueue";
 import searchRoutes from "./routes/search";
+import { engagementStatus, floorForPlatform } from "./engagement/reels";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -23,6 +24,24 @@ app.use(helmet());
 app.use(cors({ origin: process.env.CORS_ORIGIN ?? "http://localhost:5173" }));
 app.use(express.json({ limit: "10mb" }));
 app.use(pinoHttp({ logger, autoLogging: false }));
+app.use((req, res, next) => {
+  if (!req.path.startsWith("/api")) return next();
+  const started = Date.now();
+  const requestPath = req.originalUrl;
+  logger.info({ method: req.method, path: requestPath }, "API request received");
+  res.on("finish", () => {
+    logger.info(
+      {
+        method: req.method,
+        path: requestPath,
+        statusCode: res.statusCode,
+        durationMs: Date.now() - started,
+      },
+      "API request completed"
+    );
+  });
+  return next();
+});
 
 // ─── Rate limiting (Phase 5) ──────────────────────────────────────────────────
 const searchLimiter = rateLimit({
@@ -179,7 +198,14 @@ app.get("/api/shortlist/export", async (req, res, next) => {
       orderBy: { score: "desc" },
     });
 
-    const payload = rows.map((row) => ({
+    const floors = { instagram: env.MIN_INSTAGRAM_VIEWS, tiktok: env.MIN_TIKTOK_VIEWS };
+    const eligible = rows.filter((row) => {
+      if ((row.video as any).sourceKind !== "organic") return false;
+      if (row.video.platform === "instagram") return (row.video as any).contentType === "reel";
+      if (row.video.platform === "tiktok") return (row.video as any).contentType === "video";
+      return false;
+    });
+    const payload = eligible.map((row) => ({
       platform: row.video.platform,
       platformId: row.video.platformId,
       url: row.video.url,
@@ -194,11 +220,15 @@ app.get("/api/shortlist/export", async (req, res, next) => {
       isPaidPartnership: (row.video as any).isPaidPartnership ?? false,
       paidMarkerDetected: (row.video as any).paidMarkerDetected,
       dropReason: (row.video as any).dropReason,
+      views: (row.video as any).views ?? "",
+      likes: (row.video as any).likes ?? "",
+      engagementFetchedAt: (row.video as any).engagementFetchedAt?.toISOString?.() ?? (row.video as any).engagementFetchedAt ?? "",
+      engagementStatus: engagementStatus((row.video as any).views, floorForPlatform(row.video.platform, floors, env.MIN_VIDEO_VIEWS)),
     }));
 
     if (format === "csv") {
       const escape = (value: unknown) => `"${String(value ?? "").replace(/"/g, '""')}"`;
-      const header = ["platform", "platformId", "url", "thumbnailUrl", "caption", "score", "label", "reason", "metaPath", "contentType", "sourceKind", "isPaidPartnership", "paidMarkerDetected", "dropReason"] as const;
+      const header = ["platform", "platformId", "url", "thumbnailUrl", "caption", "score", "label", "reason", "metaPath", "contentType", "sourceKind", "isPaidPartnership", "paidMarkerDetected", "dropReason", "views", "likes", "engagementFetchedAt", "engagementStatus"] as const;
       const lines = [
         header.join(","),
         ...payload.map((row) => header.map((key) => escape(row[key])).join(",")),

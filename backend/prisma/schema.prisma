@@ -39,6 +39,9 @@ model Video {
   isPaidPartnership Boolean     @default(false)
   paidMarkerDetected String?
   dropReason     String?
+  views          Int?
+  likes          Int?
+  engagementFetchedAt DateTime?
   createdAt      DateTime       @default(now())
   results        SearchResult[]
 

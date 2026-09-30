@@ -5,6 +5,13 @@ import { getSearchQueue, processSearchJob } from "../jobs/searchQueue";
 import { logger } from "../lib/logger";
 import { getSearchEvents, subscribeSearchEvents } from "../jobs/progressEvents";
 import { env } from "../lib/env";
+import {
+  aboveFloorCount,
+  engagementOrderingByPlatformFor,
+  engagementStatus,
+  floorForPlatform,
+  rankOrganicVideos,
+} from "../engagement/reels";
 
 const router = Router();
 
@@ -49,6 +56,114 @@ function isHttpUrl(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+function platformFloors(): Record<string, number> {
+  return {
+    instagram: env.MIN_INSTAGRAM_VIEWS,
+    tiktok: env.MIN_TIKTOK_VIEWS,
+  };
+}
+
+function isOrganicVideoRow(row: any): boolean {
+  if (row.video?.sourceKind !== "organic") return false;
+  if (row.video?.platform === "instagram") return row.video?.contentType === "reel";
+  if (row.video?.platform === "tiktok") return row.video?.contentType === "video";
+  return false;
+}
+
+function rankedResponseRows(rows: any[]) {
+  const eligible = rows.filter(isOrganicVideoRow);
+  const orderingByPlatform = engagementOrderingByPlatformFor(eligible.map((row) => row.video));
+  const ordering: "enabled" | "disabled_low_coverage" = Object.values(orderingByPlatform).length > 0 && Object.values(orderingByPlatform).every((value) => value === "enabled")
+    ? "enabled"
+    : "disabled_low_coverage";
+  const floors = platformFloors();
+  const ranked = rankOrganicVideos(
+    eligible.map((row) => ({
+      row,
+      platform: row.video.platform,
+      score: row.score,
+      label: row.label,
+      views: row.video.views,
+      likes: row.video.likes,
+    })),
+    floors,
+    env.MIN_VIDEO_VIEWS,
+    orderingByPlatform
+  ).slice(0, env.TARGET_RESULTS * Math.max(1, Object.keys(orderingByPlatform).length));
+  return { rows: ranked.map((item) => item.row), ordering, orderingByPlatform, floors };
+}
+
+function serializeResult(row: any, engagementOrdering: "enabled" | "disabled_low_coverage", floors = platformFloors()) {
+  return {
+    id: row.videoId,
+    videoId: row.videoId,
+    platform: row.video.platform,
+    platformId: row.video.platformId,
+    url: row.video.url,
+    thumbnailUrl: row.video.thumbnailUrl,
+    caption: row.video.caption,
+    score: row.score,
+    label: row.label,
+    reason: row.reason,
+    metaPath: row.video.metaPath,
+    contentType: row.video.contentType ?? "unknown",
+    sourceKind: row.video.sourceKind ?? "unknown",
+    isPaidPartnership: row.video.isPaidPartnership ?? false,
+    paidMarkerDetected: row.video.paidMarkerDetected,
+    dropReason: row.video.dropReason,
+    views: row.video.views ?? undefined,
+    likes: row.video.likes ?? undefined,
+    engagementFetchedAt: row.video.engagementFetchedAt?.toISOString?.() ?? row.video.engagementFetchedAt,
+    engagementStatus: engagementStatus(row.video.views, floorForPlatform(row.video.platform, floors, env.MIN_VIDEO_VIEWS)),
+    engagementOrdering,
+    shortlisted: row.shortlisted,
+  };
+}
+
+function engagementSummaryByPlatform(rows: Array<{ platform: string; views?: number | null }>, floors = platformFloors()) {
+  const byPlatform = new Map<string, Array<{ views?: number | null }>>();
+  for (const row of rows) {
+    const list = byPlatform.get(row.platform) ?? [];
+    list.push(row);
+    byPlatform.set(row.platform, list);
+  }
+  return Object.fromEntries([...byPlatform.entries()].map(([platform, items]) => {
+    const floor = floorForPlatform(platform, floors, env.MIN_VIDEO_VIEWS);
+    return [platform, { aboveFloor: aboveFloorCount(items, floor), shown: items.length, floor }];
+  }));
+}
+
+function qualityNoticeFor(params: {
+  results: Array<{ label?: string; score?: number; engagementStatus?: string; reason?: string }>;
+  targetResults: number;
+  sourceWarnings?: Record<string, string[]>;
+}) {
+  const messages: string[] = [];
+  const matchCount = params.results.filter((result) => result.label === "match" && (result.score ?? 0) >= 0.6).length;
+  const highEngagementCount = params.results.filter((result) => result.engagementStatus === "high").length;
+  const fallbackCount = params.results.filter((result) => /fallback|text relevance|visual verification unavailable|inconclusive/i.test(result.reason ?? "")).length;
+
+  if (params.results.length === 0) {
+    messages.push("No eligible organic videos were found for this search.");
+  } else {
+    if (matchCount < Math.max(3, Math.ceil(params.targetResults * 0.25))) {
+      messages.push("Very few visually relevant videos were found. Results may be based on broad caption or hashtag matches.");
+    }
+    if (highEngagementCount < Math.max(3, Math.ceil(params.results.length * 0.25))) {
+      messages.push("Few returned videos clear the high-engagement view threshold.");
+    }
+    if (fallbackCount > Math.ceil(params.results.length * 0.5)) {
+      messages.push("Visual verification was unavailable or inconclusive for many videos, so ranking relied more on text signals.");
+    }
+  }
+
+  for (const [source, warnings] of Object.entries(params.sourceWarnings ?? {})) {
+    for (const warning of warnings) messages.push(`${source}: ${warning}`);
+  }
+
+  return messages.length > 0 ? { title: "Why results may look weak", messages } : undefined;
 }
 
 // ─── Input validation schema (Phase 1.1) ─────────────────────────────────────
@@ -141,6 +256,20 @@ router.post("/", async (req: Request, res: Response) => {
     showSeen,
   };
 
+  logger.info(
+    {
+      searchId,
+      queryType,
+      query,
+      queueMode: env.QUEUE_MODE,
+      searchSources: env.SEARCH_SOURCES,
+      enableTikTok: env.ENABLE_TIKTOK,
+      hasTikTokActorId: Boolean(env.TIKTOK_ACTOR_ID),
+      hasApifyToken: Boolean(env.APIFY_API_TOKEN),
+    },
+    "Search request accepted"
+  );
+
   if (env.QUEUE_MODE === "inline") {
     void processSearchJob(jobData).catch((err) =>
       logger.error({ err, searchId }, "Inline search job failed")
@@ -177,36 +306,25 @@ router.get("/:id", async (req: Request, res: Response) => {
     return res.status(404).json({ error: "Search not found" });
   }
 
+  const ranked = rankedResponseRows(search.results);
+  const serializedResults = ranked.rows.map((row: any) => serializeResult(row, ranked.ordering, ranked.floors));
+
   return res.json({
     contractVersion: 1,
     searchId: id,
     status: search.status === "completed" ? "done" : search.status,
-    results: search.results.map((r: any) => ({
-      id: r.videoId,
-      videoId: r.videoId,
-      platform: r.video.platform,
-      platformId: r.video.platformId,
-      url: r.video.url,
-      thumbnailUrl: r.video.thumbnailUrl,
-      caption: r.video.caption,
-      score: r.score,
-      label: r.label,
-      reason: r.reason,
-      metaPath: r.video.metaPath,
-      contentType: r.video.contentType ?? "unknown",
-      sourceKind: r.video.sourceKind ?? (r.video.platform === "meta" ? "ads" : "unknown"),
-      isPaidPartnership: r.video.isPaidPartnership ?? false,
-      paidMarkerDetected: r.video.paidMarkerDetected,
-      dropReason: r.video.dropReason,
-      shortlisted: r.shortlisted,
-    })),
+    results: serializedResults,
     targetResults: env.TARGET_RESULTS,
-    sourceKinds: Object.fromEntries(
-      search.results.map((r: any) => [
-        r.video.platform,
-        r.video.sourceKind ?? (r.video.platform === "meta" ? "ads" : "unknown"),
-      ])
-    ),
+    engagementOrdering: ranked.ordering,
+    engagementOrderingByPlatform: ranked.orderingByPlatform,
+    engagementSummary: {
+      aboveFloor: aboveFloorCount(serializedResults, env.MIN_VIDEO_VIEWS),
+      shown: serializedResults.length,
+      floor: env.MIN_VIDEO_VIEWS,
+    },
+    engagementSummaryByPlatform: engagementSummaryByPlatform(serializedResults, ranked.floors),
+    qualityNotice: qualityNoticeFor({ results: serializedResults, targetResults: env.TARGET_RESULTS }),
+    sourceKinds: Object.fromEntries(Array.from(new Set(serializedResults.map((row: any) => row.platform))).map((platform) => [platform, "organic"])),
     productInfo: {
       title: search.productTitle,
       imageUrl: search.imageUrl,
@@ -274,7 +392,8 @@ router.get("/../shortlist/export", async (req: Request, res: Response) => {
     orderBy: { score: "desc" },
   });
 
-  const payload = rows.map((row) => ({
+  const ranked = rankedResponseRows(rows);
+  const payload = ranked.rows.map((row) => ({
     platform: row.video.platform,
     platformId: row.video.platformId,
     url: row.video.url,
@@ -289,11 +408,16 @@ router.get("/../shortlist/export", async (req: Request, res: Response) => {
     isPaidPartnership: (row.video as any).isPaidPartnership ?? false,
     paidMarkerDetected: (row.video as any).paidMarkerDetected,
     dropReason: (row.video as any).dropReason,
+    views: (row.video as any).views ?? "",
+    likes: (row.video as any).likes ?? "",
+    engagementFetchedAt: (row.video as any).engagementFetchedAt?.toISOString?.() ?? (row.video as any).engagementFetchedAt ?? "",
+    engagementStatus: engagementStatus((row.video as any).views, floorForPlatform(row.video.platform, ranked.floors, env.MIN_VIDEO_VIEWS)),
+    engagementOrdering: ranked.ordering,
   }));
 
   if (format === "csv") {
     const escape = (value: unknown) => `"${String(value ?? "").replace(/"/g, '""')}"`;
-    const header = ["platform", "platformId", "url", "thumbnailUrl", "caption", "score", "label", "reason", "metaPath", "contentType", "sourceKind", "isPaidPartnership", "paidMarkerDetected", "dropReason"];
+    const header = ["platform", "platformId", "url", "thumbnailUrl", "caption", "score", "label", "reason", "metaPath", "contentType", "sourceKind", "isPaidPartnership", "paidMarkerDetected", "dropReason", "views", "likes", "engagementFetchedAt", "engagementStatus", "engagementOrdering"];
     const lines = [
       header.join(","),
       ...payload.map((row) => header.map((key) => escape(row[key as keyof typeof row])).join(",")),

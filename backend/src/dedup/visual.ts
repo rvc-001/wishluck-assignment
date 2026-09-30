@@ -3,8 +3,11 @@ import sharp from "sharp";
 import { cosineSimilarity } from "../brain/imageBrain";
 import { Video } from "../collectors/types";
 import { env } from "../lib/env";
+import { logger } from "../lib/logger";
 
 const HASH_SIZE = 8;
+const HASH_TIMEOUT_MS = 4000;
+const HASH_CONCURRENCY = 8;
 
 export function hammingDistance(a: string, b: string): number {
   if (!a || !b || a.length !== b.length) return Number.MAX_SAFE_INTEGER;
@@ -19,7 +22,7 @@ export async function computeAverageHash(thumbnailUrl: string): Promise<string> 
   if (!thumbnailUrl) return "";
   const resp = await axios.get<ArrayBuffer>(thumbnailUrl, {
     responseType: "arraybuffer",
-    timeout: 10000,
+    timeout: HASH_TIMEOUT_MS,
     maxContentLength: 5 * 1024 * 1024,
   });
 
@@ -37,11 +40,53 @@ export async function computeAverageHash(thumbnailUrl: string): Promise<string> 
 async function ensureThumbHash(video: Video): Promise<string> {
   if (video.thumbPHash) return video.thumbPHash;
   try {
-    video.thumbPHash = await computeAverageHash(video.thumbnailUrl);
-  } catch {
+    video.thumbPHash = await withTimeout(computeAverageHash(video.thumbnailUrl), HASH_TIMEOUT_MS, "");
+  } catch (err) {
+    logger.warn(
+      {
+        platform: video.platform,
+        platformId: video.platformId,
+        thumbnailHost: safeHost(video.thumbnailUrl),
+        err: err instanceof Error ? err.message : String(err),
+      },
+      "Visual dedup thumbnail hash failed"
+    );
     video.thumbPHash = "";
   }
   return video.thumbPHash ?? "";
+}
+
+function safeHost(value?: string): string | undefined {
+  if (!value) return undefined;
+  try {
+    return new URL(value).hostname;
+  } catch {
+    return undefined;
+  }
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(fallback), timeoutMs);
+    promise
+      .then((value) => resolve(value))
+      .catch(() => resolve(fallback))
+      .finally(() => clearTimeout(timer));
+  });
+}
+
+async function precomputeThumbHashes(videos: Video[]): Promise<void> {
+  for (let i = 0; i < videos.length; i += HASH_CONCURRENCY) {
+    const batch = videos.slice(i, i + HASH_CONCURRENCY);
+    await Promise.all(batch.map((video) => ensureThumbHash(video)));
+    logger.info(
+      {
+        done: Math.min(i + batch.length, videos.length),
+        total: videos.length,
+      },
+      "Visual dedup thumbnail hash progress"
+    );
+  }
 }
 
 export async function dedupVisual(
@@ -54,12 +99,15 @@ export async function dedupVisual(
   const clipThreshold = opts.clipThreshold ?? 0.95;
   const uniqueVideos: Video[] = [];
 
+  logger.info({ videos: videos.length }, "Visual dedup started");
+  await precomputeThumbHashes(videos);
+
   for (const video of videos) {
-    const hash = await ensureThumbHash(video);
+    const hash = video.thumbPHash ?? "";
     let isDuplicate = false;
 
     for (const unique of uniqueVideos) {
-      const uniqueHash = await ensureThumbHash(unique);
+      const uniqueHash = unique.thumbPHash ?? "";
       if (hash && uniqueHash && hammingDistance(hash, uniqueHash) <= pHashDistance) {
         isDuplicate = true;
         break;

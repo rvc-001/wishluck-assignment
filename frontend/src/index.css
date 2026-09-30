@@ -245,6 +245,17 @@ select:focus-visible {
   letter-spacing: 0;
 }
 
+.results-subcopy {
+  margin: 6px 0 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.results-subcopy--warning {
+  color: var(--possible);
+}
+
 .eyebrow {
   margin: 0 0 7px;
   color: var(--primary-2);
@@ -734,6 +745,36 @@ select:focus-visible {
   font-size: 13px !important;
 }
 
+.diagnostics-box {
+  max-width: 860px;
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: #f8fafc;
+}
+
+.diagnostics-box summary {
+  min-height: 34px;
+  padding: 8px 10px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.diagnostics-grid {
+  display: grid;
+  gap: 6px;
+  padding: 0 10px 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.diagnostics-grid span {
+  overflow-wrap: anywhere;
+}
+
 .results-heading {
   display: flex;
   align-items: center;
@@ -877,11 +918,13 @@ select:focus-visible {
 
 .video-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(282px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
   gap: 16px;
 }
 
 .video-card {
+  display: grid;
+  grid-template-rows: auto 1fr;
   overflow: hidden;
   background: white;
 }
@@ -894,7 +937,7 @@ select:focus-visible {
 
 .thumbnail {
   position: relative;
-  aspect-ratio: 16 / 10;
+  aspect-ratio: 4 / 3;
   overflow: hidden;
   background: #111827;
 }
@@ -942,14 +985,23 @@ select:focus-visible {
 
 .video-card__body {
   display: grid;
+  grid-template-rows: auto auto auto minmax(42px, auto) auto;
   gap: 10px;
   padding: 14px;
 }
 
 .result-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
+}
+
+.result-badges {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .result-row > span,
@@ -967,10 +1019,58 @@ select:focus-visible {
 }
 
 .result-row strong {
-  margin-left: auto;
+  min-width: 42px;
   color: var(--text);
   font-size: 22px;
   letter-spacing: 0;
+  line-height: 1;
+  text-align: right;
+}
+
+.engagement-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  background: #ffffff;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.engagement-badge--high {
+  border-color: rgba(7, 148, 85, 0.24);
+  color: var(--match);
+  background: rgba(7, 148, 85, 0.08);
+}
+
+.engagement-badge--below_floor {
+  border-color: rgba(181, 71, 8, 0.24);
+  color: var(--possible);
+  background: rgba(181, 71, 8, 0.08);
+}
+
+.engagement-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.engagement-stats span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  background: #f8fafc;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
 }
 
 .badge-match {
@@ -1013,6 +1113,18 @@ select:focus-visible {
   color: var(--text-muted);
   font-size: 13px;
   line-height: 1.48;
+}
+
+.caption {
+  display: -webkit-box;
+  min-height: 42px;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.card-actions {
+  align-self: end;
 }
 
 .card-actions {
@@ -1063,6 +1175,47 @@ select:focus-visible {
   margin: 5px 0 0;
   color: #912018;
   font-size: 13px;
+}
+
+.notice-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(15, 23, 42, 0.38);
+  backdrop-filter: blur(5px);
+}
+
+.notice-modal {
+  width: min(560px, 100%);
+  padding: 20px;
+  border: 1px solid rgba(181, 71, 8, 0.24);
+  border-radius: var(--radius-lg);
+  background: #ffffff;
+  box-shadow: var(--shadow-lg);
+}
+
+.notice-modal h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 20px;
+  line-height: 1.2;
+}
+
+.notice-modal ul {
+  display: grid;
+  gap: 8px;
+  margin: 14px 0 18px;
+  padding-left: 20px;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.notice-action {
+  width: 100%;
 }
 
 .empty-state {

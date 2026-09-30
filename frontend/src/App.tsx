@@ -13,6 +13,12 @@ interface SearchResult {
   targetResults?: number
   sourceKinds?: Record<string, 'organic' | 'ads' | 'unknown'>
   dropReasons?: Record<string, number>
+  sourceWarnings?: Record<string, string[]>
+  engagementOrdering?: 'enabled' | 'disabled_low_coverage'
+  engagementSummary?: EngagementSummary
+  engagementSummaryByPlatform?: Record<string, EngagementSummary>
+  engagementOrderingByPlatform?: Record<string, 'enabled' | 'disabled_low_coverage'>
+  qualityNotice?: QualityNotice
 }
 
 interface ProductInfo {
@@ -20,6 +26,7 @@ interface ProductInfo {
   imageUrl: string
   description?: string
   attributes?: ProductAttributes
+  diagnostics?: QueryPlanDiagnostics
 }
 
 interface ProductAttributes {
@@ -32,6 +39,20 @@ interface ProductAttributes {
   searchQueries?: string[]
   adKeywords?: string[]
   matchCriteria?: string
+  queryPlan?: QueryPlanDiagnostics
+}
+
+interface QueryPlanDiagnostics {
+  instagramQueries?: string[]
+  tiktokQueries?: string[]
+  metaQueries?: string[]
+  sources?: string[]
+  sourceWarnings?: Record<string, string[]>
+}
+
+interface QualityNotice {
+  title: string
+  messages: string[]
 }
 
 interface VideoResult {
@@ -51,7 +72,18 @@ interface VideoResult {
   isPaidPartnership?: boolean
   paidMarkerDetected?: string
   dropReason?: string
+  views?: number
+  likes?: number
+  engagementFetchedAt?: string
+  engagementStatus?: 'high' | 'below_floor' | 'unknown'
+  engagementOrdering?: 'enabled' | 'disabled_low_coverage'
   shortlisted?: boolean
+}
+
+interface EngagementSummary {
+  aboveFloor: number
+  shown: number
+  floor: number
 }
 
 interface HistoryItem {
@@ -122,6 +154,36 @@ function formatDuration(seconds: number) {
   if (seconds < 60) return `${Math.ceil(seconds)} sec`
   const minutes = Math.ceil(seconds / 60)
   return `${minutes} min`
+}
+
+function formatCompactCount(value: number) {
+  if (value < 1000) return String(value)
+  if (value >= 999_950) {
+    const rounded = Math.round((value / 1_000_000) * 10) / 10
+    return `${Number.isInteger(rounded) ? rounded.toFixed(0) : rounded.toFixed(1)}M`
+  }
+  const rounded = Math.round((value / 1000) * 10) / 10
+  return `${Number.isInteger(rounded) ? rounded.toFixed(0) : rounded.toFixed(1)}K`
+}
+
+function formatViews(value: number) {
+  return `${formatCompactCount(value)} ${value === 1 ? 'view' : 'views'}`
+}
+
+function formatLikes(value: number) {
+  return `${formatCompactCount(value)} ${value === 1 ? 'like' : 'likes'}`
+}
+
+function platformLabel(platform: string) {
+  if (platform === 'instagram') return 'Instagram'
+  if (platform === 'tiktok') return 'TikTok'
+  return platform
+}
+
+function contentLabel(contentType?: string) {
+  if (contentType === 'reel') return 'Reel'
+  if (contentType === 'video') return 'Video'
+  return contentType
 }
 
 function stageIndex(stage: string) {
@@ -337,6 +399,7 @@ function ProcessIndicator({
 
 function ProductPanel({ product }: { product: ProductInfo }) {
   const attributes = product.attributes
+  const diagnostics = product.diagnostics ?? attributes?.queryPlan
   const chips = [
     attributes?.productType,
     ...(attributes?.colors ?? []),
@@ -361,6 +424,20 @@ function ProductPanel({ product }: { product: ProductInfo }) {
           </div>
         )}
         {attributes?.matchCriteria && <p className="match-criteria">{attributes.matchCriteria}</p>}
+        {diagnostics && (
+          <details className="diagnostics-box">
+            <summary>Search diagnostics</summary>
+            <div className="diagnostics-grid">
+              {diagnostics.sources && <span>Sources: {diagnostics.sources.join(', ')}</span>}
+              {diagnostics.instagramQueries && <span>Instagram queries: {diagnostics.instagramQueries.join(', ')}</span>}
+              {diagnostics.tiktokQueries && diagnostics.tiktokQueries.length > 0 && <span>TikTok queries: {diagnostics.tiktokQueries.join(', ')}</span>}
+              {diagnostics.metaQueries && <span>Meta queries: {diagnostics.metaQueries.join(', ')}</span>}
+              {Object.entries(diagnostics.sourceWarnings ?? {}).map(([source, warnings]) => (
+                <span key={source}>{source} warning: {warnings.join(' ')}</span>
+              ))}
+            </div>
+          </details>
+        )}
       </div>
     </section>
   )
@@ -425,7 +502,7 @@ function FilterBar({
       </label>
 
       <select value={sortMode} onChange={e => onSortModeChange(e.target.value as SortMode)} aria-label="Sort results">
-        <option value="score">Sort by score</option>
+        <option value="score">Relevance + views</option>
         <option value="platform">Sort by platform</option>
         <option value="newest">Sort by newest</option>
       </select>
@@ -435,26 +512,50 @@ function FilterBar({
 
 function VideoCard({
   video,
+  floor,
   shortlisted,
   onToggleShortlist,
 }: {
   video: VideoResult
+  floor: number
   shortlisted: boolean
   onToggleShortlist: (videoId: string) => void
 }) {
+  const [thumbnailFailed, setThumbnailFailed] = useState(false)
+  useEffect(() => {
+    setThumbnailFailed(false)
+  }, [video.thumbnailUrl])
   const scorePercent = Math.round(video.score * 100)
   const labelClass = video.label === 'match' ? 'badge-match' : video.label === 'possible' ? 'badge-possible' : 'badge-discard'
   const sourceKind = video.sourceKind ?? (video.platform === 'meta' ? 'ads' : 'unknown')
+  const engagementStatus = video.engagementStatus ?? 'unknown'
+  const engagementLabel =
+    engagementStatus === 'high'
+      ? 'High engagement'
+      : engagementStatus === 'below_floor'
+        ? `Below ${formatCompactCount(floor)} views`
+        : 'Views unavailable'
   return (
     <article className="video-card panel-enter">
       <div className="thumbnail">
-        {video.thumbnailUrl ? <img src={video.thumbnailUrl} alt="Video thumbnail" /> : <div className="thumbnail__missing">No thumbnail</div>}
-        <span>{video.platform}{sourceKind === 'ads' ? ' / ad' : video.contentType ? ` / ${video.contentType}` : ''}</span>
+        {video.thumbnailUrl && !thumbnailFailed ? (
+          <img src={video.thumbnailUrl} alt="Video thumbnail" onError={() => setThumbnailFailed(true)} />
+        ) : (
+          <div className="thumbnail__missing">Thumbnail unavailable</div>
+        )}
+        <span>{platformLabel(video.platform)}{sourceKind === 'ads' ? ' / Ad' : video.contentType ? ` / ${contentLabel(video.contentType)}` : ''}</span>
       </div>
       <div className="video-card__body">
         <div className="result-row">
-          <span className={labelClass}>{video.label}</span>
+          <div className="result-badges">
+            <span className={labelClass}>{video.label}</span>
+            <span className={`engagement-badge engagement-badge--${engagementStatus}`}>{engagementLabel}</span>
+          </div>
           <strong>{scorePercent}</strong>
+        </div>
+        <div className="engagement-stats">
+          {typeof video.views === 'number' && <span>{formatViews(video.views)}</span>}
+          {typeof video.likes === 'number' && <span>{formatLikes(video.likes)}</span>}
         </div>
         <div className="reason-box">
           <span>Reason</span>
@@ -486,6 +587,23 @@ function EmptyState({ message, hint }: { message: string; hint: string }) {
   )
 }
 
+function QualityNoticeModal({ notice, onClose }: { notice: QualityNotice; onClose: () => void }) {
+  return (
+    <div className="notice-backdrop" role="dialog" aria-modal="true" aria-labelledby="quality-notice-title">
+      <section className="notice-modal panel-enter">
+        <div>
+          <p className="eyebrow">Result notice</p>
+          <h2 id="quality-notice-title">{notice.title}</h2>
+        </div>
+        <ul>
+          {notice.messages.map((message, index) => <li key={`${message}-${index}`}>{message}</li>)}
+        </ul>
+        <button type="button" className="primary-action notice-action" onClick={onClose}>Got it</button>
+      </section>
+    </div>
+  )
+}
+
 export default function App() {
   const health = useHealth()
   const [loading, setLoading] = useState(false)
@@ -501,6 +619,7 @@ export default function App() {
   const [sortMode, setSortMode] = useState<SortMode>('score')
   const [showSeen, setShowSeen] = useState(false)
   const [shortlistedIds, setShortlistedIds] = useState<Set<string>>(new Set())
+  const [qualityNotice, setQualityNotice] = useState<QualityNotice | null>(null)
 
   const refreshHistory = useCallback(async () => {
     try {
@@ -526,7 +645,14 @@ export default function App() {
       targetResults: data.targetResults,
       sourceKinds: data.sourceKinds,
       dropReasons: data.dropReasons,
+      sourceWarnings: data.sourceWarnings,
+      engagementOrdering: data.engagementOrdering,
+      engagementSummary: data.engagementSummary,
+      engagementSummaryByPlatform: data.engagementSummaryByPlatform,
+      engagementOrderingByPlatform: data.engagementOrderingByPlatform,
+      qualityNotice: data.qualityNotice,
     })
+    setQualityNotice(data.qualityNotice ?? null)
     setShortlistedIds(new Set((data.results ?? []).filter((result: VideoResult) => result.shortlisted).map((result: VideoResult) => result.videoId ?? result.id)))
     setActiveStage('done')
     setProgressDetail('Search complete')
@@ -611,7 +737,14 @@ export default function App() {
             targetResults: evt.targetResults,
             sourceKinds: evt.sourceKinds,
             dropReasons: evt.dropReasons,
+            sourceWarnings: evt.sourceWarnings,
+            engagementOrdering: evt.engagementOrdering,
+            engagementSummary: evt.engagementSummary,
+            engagementSummaryByPlatform: evt.engagementSummaryByPlatform,
+            engagementOrderingByPlatform: evt.engagementOrderingByPlatform,
+            qualityNotice: evt.qualityNotice,
           })
+          setQualityNotice(evt.qualityNotice ?? null)
           setShortlistedIds(new Set())
           setActiveSource('all')
           refreshHistory()
@@ -646,7 +779,11 @@ export default function App() {
       results.filter(result => result.platform === source).length,
     ])),
   }), [results])
-  const sourceTabs = useMemo(() => ['all', ...Array.from(new Set(results.map(result => result.platform)))], [results])
+  const sourceTabs = useMemo(() => {
+    const fromResults = new Set(results.map(result => result.platform))
+    for (const source of Object.keys(searchResult?.sourceWarnings ?? {})) fromResults.add(source)
+    return ['all', ...Array.from(fromResults)]
+  }, [results, searchResult?.sourceWarnings])
 
   const visibleResults = useMemo(() => {
     const filtered = results.filter(result => {
@@ -658,7 +795,7 @@ export default function App() {
     return [...filtered].sort((a, b) => {
       if (sortMode === 'platform') return a.platform.localeCompare(b.platform)
       if (sortMode === 'newest') return String(b.id).localeCompare(String(a.id))
-      return b.score - a.score
+      return 0
     })
   }, [results, activeSource, minScore, sortMode])
 
@@ -686,6 +823,7 @@ export default function App() {
 
   return (
     <div className="app-shell">
+      {qualityNotice && <QualityNoticeModal notice={qualityNotice} onClose={() => setQualityNotice(null)} />}
       <div className="scene-grid" aria-hidden="true" />
       <Header health={health} />
       <main className="app-layout">
@@ -713,7 +851,19 @@ export default function App() {
               <section className="results-heading panel-enter">
                 <div>
                   <p className="eyebrow">Results</p>
-                  <h2>Candidate videos</h2>
+                  <h2>Organic Videos</h2>
+                  {searchResult.engagementOrdering === 'disabled_low_coverage' ? (
+                    <p className="results-subcopy">Engagement ordering unavailable for this batch; sorted by relevance.</p>
+                  ) : searchResult.engagementSummary ? (
+                    <p className="results-subcopy">
+                      {searchResult.engagementSummary.aboveFloor} of {searchResult.engagementSummary.shown} shown above {formatCompactCount(searchResult.engagementSummary.floor)} views
+                    </p>
+                  ) : null}
+                  {Object.entries(searchResult.sourceWarnings ?? {}).map(([source, warnings]) => (
+                    <p className="results-subcopy results-subcopy--warning" key={source}>
+                      {source}: {warnings.join(' ')}
+                    </p>
+                  ))}
                 </div>
                 <div className="results-actions">
                   <strong className={`counter counter--${counterTone}`}>
@@ -739,13 +889,17 @@ export default function App() {
                 sources={sourceTabs}
               />
               {visibleResults.length === 0 ? (
-                <EmptyState message="No visible results" hint="Try lowering the score filter, switching tabs, or searching a broader product." />
+                <EmptyState
+                  message="No visible results"
+                  hint={(searchResult.sourceWarnings?.[activeSource] ?? []).join(' ') || 'Try lowering the score filter, switching tabs, or searching a broader product.'}
+                />
               ) : (
                 <section className="video-grid">
                   {visibleResults.map(video => (
                     <VideoCard
                       key={`${video.platform}-${video.id}`}
                       video={video}
+                      floor={searchResult.engagementSummary?.floor ?? 7500}
                       shortlisted={shortlistedIds.has(video.videoId ?? video.id)}
                       onToggleShortlist={toggleShortlist}
                     />

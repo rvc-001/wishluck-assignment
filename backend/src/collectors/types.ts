@@ -16,6 +16,7 @@ export interface Video {
   creatorHandle?: string;
   likes?: number;
   views?: number;
+  engagementFetchedAt?: string;
   metaPath?: "official" | "fallback";
   contentType?: "reel" | "video" | "image" | "carousel" | "unknown";
   sourceKind?: "organic" | "ads" | "unknown";

@@ -137,8 +137,34 @@ async function withVisionModel<T>(
 }
 
 // ─── Download image as base64 ─────────────────────────────────────────────────
+function safeHost(value?: string): string | undefined {
+  if (!value) return undefined;
+  try {
+    return new URL(value).hostname;
+  } catch {
+    return undefined;
+  }
+}
+
+function compactError(err: unknown): Record<string, unknown> {
+  if (axios.isAxiosError(err)) {
+    return {
+      message: err.response?.data?.error?.message ?? err.message,
+      code: err.code,
+      status: err.response?.status,
+      type: err.response?.data?.error?.type,
+      urlHost: safeHost(err.config?.url),
+      method: err.config?.method,
+    };
+  }
+  return {
+    message: err instanceof Error ? err.message : String(err),
+  };
+}
+
 async function fetchImageBase64(
-  url: string
+  url: string,
+  opts: { timeoutMs?: number } = {}
 ): Promise<{ base64: string; mimeType: string }> {
   const imageUrl = extractUrlFromText(url);
   const dataUrlMatch = imageUrl.match(/^data:([^;]+);base64,(.+)$/);
@@ -156,7 +182,7 @@ async function fetchImageBase64(
   }
   const resp = await axios.get<ArrayBuffer>(imageUrl, {
     responseType: "arraybuffer",
-    timeout: 10000,
+    timeout: opts.timeoutMs ?? 10000,
     maxContentLength: 5 * 1024 * 1024,
     headers: {
       "User-Agent": "Mozilla/5.0 (compatible; WishLuck/1.0)",
@@ -170,9 +196,9 @@ async function fetchImageBase64(
 }
 
 // ─── Stage A: Attribute Extraction (Phase 2.1 – 2.5) ─────────────────────────
-export async function analyzeImage(imageUrl: string, title?: string): Promise<ImageBrainResult> {
+export async function analyzeImage(imageUrl: string, title?: string, description?: string): Promise<ImageBrainResult> {
   const cleanImageUrl = extractUrlFromText(imageUrl);
-  const cacheKey = `imgbrain:v3:${sha256(cleanImageUrl)}`;
+  const cacheKey = `imgbrain:v4:${sha256(`${cleanImageUrl}:${title ?? ""}:${description ?? ""}`)}`;
   const cached = await cacheGetJSON<ImageBrainResult>(cacheKey);
   if (cached) {
     logger.info({ cacheKey }, "Image brain cache hit");
@@ -181,7 +207,7 @@ export async function analyzeImage(imageUrl: string, title?: string): Promise<Im
 
   logger.info({ imageUrl: cleanImageUrl }, "Analyzing product image via Gemini Vision");
 
-  const attributes = await extractAttributesWithRetry(cleanImageUrl, title);
+  const attributes = await extractAttributesWithRetry(cleanImageUrl, title, description);
   const embedding = await computeClipEmbedding(cleanImageUrl);
 
   const result: ImageBrainResult = { attributes, embedding };
@@ -263,7 +289,8 @@ export async function analyzeKeyword(keyword: string): Promise<ImageBrainResult>
 // ─── 2.1 + 2.2: VLM prompt → structured JSON with retry ─────────────────────
 async function extractAttributesWithRetry(
   imageUrl: string,
-  title?: string
+  title?: string,
+  description?: string
 ): Promise<ProductAttributes> {
   if (env.USE_FIXTURES) {
     return {
@@ -288,7 +315,10 @@ async function extractAttributesWithRetry(
           inlineData: { data: base64, mimeType },
         };
 
-        const prompt = `You are a visual product analysis engine. Analyze this product image and return ONLY valid JSON matching this exact schema — no markdown, no explanation:
+        const prompt = `You are a product analysis engine. Use the product title and description as the source of truth for what the product is, then use the image only to enrich visual details. Return ONLY valid JSON matching this exact schema — no markdown, no explanation:
+
+Product title: "${title ?? "unknown"}"
+Product description: "${description ?? "unknown"}"
 
 {
   "productType": "<concise product type, e.g. 'floral print midi dress'>",
@@ -302,7 +332,10 @@ async function extractAttributesWithRetry(
   "matchCriteria": "<one human-readable sentence describing the key visual attributes to match against, referencing specific colors/patterns/shape>"
 }
 
-Focus on visual attributes only. Do not invent text not visible in the image.`;
+Rules:
+- Do not reinterpret the product as an accessory, phone case, poster, package, or background object when the title/description names the actual product.
+- Search queries must target the product being sold, not incidental artwork or objects in the photo.
+- If the image and title conflict, preserve the product type from the title and use the image for colors, patterns, and shape only.`;
 
         const result = await withVisionModel("attribute extraction", async (modelName) => {
           const genAI = getGemini();
@@ -472,8 +505,8 @@ export async function scoreVideoWithVLM(
     async () => {
       try {
         const [productImg, videoImg] = await Promise.all([
-          fetchImageBase64(productImageUrl),
-          fetchImageBase64(candidateThumbnailUrl),
+          fetchImageBase64(productImageUrl, { timeoutMs: 10000 }),
+          fetchImageBase64(candidateThumbnailUrl, { timeoutMs: 3500 }),
         ]);
 
         const prompt = `You are a visual product matching engine.
@@ -541,7 +574,7 @@ Return ONLY valid JSON, no markdown:
         throw err;
       }
     },
-    { maxAttempts: 2, baseDelay: 1000 }
+    { maxAttempts: 1, baseDelay: 1000 }
   );
 }
 
@@ -605,7 +638,10 @@ export async function scoreVideo(
       productAttributes.matchCriteria
     );
   } catch (err) {
-    logger.warn({ err, candidateThumbnailUrl }, "VLM scoring failed for video");
+    logger.warn(
+      { err: compactError(err), thumbnailHost: safeHost(candidateThumbnailUrl) },
+      "VLM scoring failed for video"
+    );
     vlmResult = {
       vlmScore: 0,
       sameProduct: false,
@@ -668,12 +704,13 @@ export async function bulkScoreVideos(
         );
         const visualScore = computeFinalScore(c.clipScore, vlm.vlmScore, vlm.reason, vlm.sameProduct);
         if (visualScore.finalScore < 0.4 && lexical >= 0.45) {
+          const fallbackRelevance = lexical >= 0.8 ? 0.65 : 0.52;
           return {
             id: c.id,
             score: computeFinalScore(
-              Math.min(0.75, lexical),
-              Math.round(Math.min(0.75, lexical) * 100),
-              "Fallback relevance: source caption and search terms match the product when visual verification is unavailable or inconclusive.",
+              fallbackRelevance,
+              Math.round(fallbackRelevance * 100),
+              "Possible text relevance: source caption and search terms match the product, but visual verification was unavailable or inconclusive.",
               lexical >= 0.6
             ),
           };
@@ -683,14 +720,18 @@ export async function bulkScoreVideos(
           score: visualScore,
         };
       } catch (err) {
-        logger.warn({ err, candidateId: c.id, visualUrl: c.thumbnailUrl }, "Bulk VLM scoring failed for candidate; using fallback score");
+        logger.warn(
+          { err: compactError(err), candidateId: c.id, visualHost: safeHost(c.thumbnailUrl) },
+          "Bulk VLM scoring failed for candidate; using fallback score"
+        );
         if (lexical >= 0.45) {
+          const fallbackRelevance = lexical >= 0.8 ? 0.65 : 0.52;
           return {
             id: c.id,
             score: computeFinalScore(
-              Math.min(0.75, Math.max(c.clipScore, lexical)),
-              Math.round(Math.min(0.75, lexical) * 100),
-              "Fallback relevance: visual verification was unavailable, so the score uses thumbnail similarity and source text relevance.",
+              Math.max(Math.min(c.clipScore, 0.55), fallbackRelevance),
+              Math.round(fallbackRelevance * 100),
+              "Possible text relevance: visual verification was unavailable, so the score uses thumbnail similarity and source text relevance.",
               lexical >= 0.6
             ),
           };
